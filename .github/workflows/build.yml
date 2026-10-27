@@ -1,0 +1,35 @@
+name: Build Cronos APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+      - name: Build debug APK
+        run: |
+          if [ -f ./gradlew ]; then
+            chmod +x ./gradlew
+            ./gradlew assembleDebug --no-daemon
+          else
+            wget -q https://services.gradle.org/distributions/gradle-8.11.1-bin.zip
+            unzip -q gradle-8.11.1-bin.zip
+            export PATH=$PWD/gradle-8.11.1/bin:$PATH
+            gradle assembleDebug --no-daemon
+          fi
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: cronos-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
