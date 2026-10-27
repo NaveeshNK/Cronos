@@ -149,7 +149,7 @@ object DaylightEnhancer {
 
     private fun Float.powSafe(exp: Float): Float {
         if (this <= 0f) return 0f
-        return this.toDouble().pow(exp.toDouble()).toFloat()
+        return Math.pow(this.toDouble(), exp.toDouble()).toFloat()
     }
 
     private fun softContrast(x: Float, amount: Float): Float {
