@@ -89,7 +89,7 @@ fun CronosApp() {
     val context = LocalContext.current
     val cameraPermission = rememberPermissionState(Manifest.permission.CAMERA)
     var screen by remember { mutableStateOf<Screen>(Screen.Camera) }
-    var strength by remember { mutableFloatStateOf(0.48f) }
+    var strength by remember { mutableFloatStateOf(0.42f) }
     var processing by remember { mutableStateOf(false) }
     var useFront by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
