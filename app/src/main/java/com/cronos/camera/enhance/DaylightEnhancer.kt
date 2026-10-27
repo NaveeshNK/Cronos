@@ -10,12 +10,12 @@ import kotlin.math.min
 import kotlin.math.pow
 
 /**
- * Scene-aware enhance (daylight + indoor mixed light).
- * strength 0..1 blends original → full pipeline.
+ * Pipeline v3 — closer to clean phone-camera look indoors,
+ * still a light polish in daylight.
  */
 object DaylightEnhancer {
 
-    fun enhance(source: Bitmap, strength: Float = 0.55f): Bitmap {
+    fun enhance(source: Bitmap, strength: Float = 0.48f): Bitmap {
         val s = strength.coerceIn(0f, 1f)
         if (s <= 0.01f) return source.copy(Bitmap.Config.ARGB_8888, false)
 
@@ -28,13 +28,14 @@ object DaylightEnhancer {
         val pixels = IntArray(n)
         input.getPixels(pixels, 0, w, 0, 0, w, h)
 
-        // --- Scene stats ---
         var sumR = 0L
         var sumG = 0L
         var sumB = 0L
         var sumY = 0L
         var darkCount = 0
         var brightCount = 0
+        // Percentile approximation via histogram
+        val hist = IntArray(256)
         for (p in pixels) {
             val r = (p shr 16) and 0xFF
             val g = (p shr 8) and 0xFF
@@ -44,8 +45,9 @@ object DaylightEnhancer {
             sumB += b
             val y = (r * 3 + g * 6 + b) / 10
             sumY += y
-            if (y < 40) darkCount++
-            if (y > 220) brightCount++
+            hist[y.coerceIn(0, 255)]++
+            if (y < 35) darkCount++
+            if (y > 230) brightCount++
         }
         val avgR = sumR.toFloat() / n
         val avgG = sumG.toFloat() / n
@@ -54,54 +56,78 @@ object DaylightEnhancer {
         val darkRatio = darkCount.toFloat() / n
         val brightRatio = brightCount.toFloat() / n
 
-        // Indoor heuristic: lower overall brightness or strong warm cast under artificial light
-        val warmCast = avgR > avgB + 12f
-        val indoor = avgY < 118f || (warmCast && avgY < 145f) || darkRatio > 0.22f
-
-        // White balance gains — milder outdoors, stronger neutralize indoors
-        val avg = (avgR + avgG + avgB) / 3f
-        var gainR = if (avgR > 1f) avg / avgR else 1f
-        var gainG = if (avgG > 1f) avg / avgG else 1f
-        var gainB = if (avgB > 1f) avg / avgB else 1f
-        val wbRange = if (indoor) 0.88f to 1.12f else 0.94f to 1.06f
-        gainR = gainR.coerceIn(wbRange.first, wbRange.second)
-        gainG = gainG.coerceIn(wbRange.first, wbRange.second)
-        gainB = gainB.coerceIn(wbRange.first, wbRange.second)
-        // Indoor: pull yellow out a bit more (boost B, tame R)
-        if (indoor && warmCast) {
-            gainR *= 0.97f
-            gainB *= 1.04f
+        fun percentile(p: Float): Int {
+            val target = (n * p).toInt().coerceIn(0, n - 1)
+            var acc = 0
+            for (i in 0..255) {
+                acc += hist[i]
+                if (acc >= target) return i
+            }
+            return 255
         }
-        val wbBlend = if (indoor) s * 0.95f else s * 0.7f
-        val gR = lerp(1f, gainR, wbBlend)
-        val gG = lerp(1f, gainG, wbBlend)
-        val gB = lerp(1f, gainB, wbBlend)
+        val p5 = percentile(0.05f)
+        val p95 = percentile(0.95f)
 
-        // Shadow lift & highlight compress amounts
-        val shadowLift = if (indoor) 0.18f * s else 0.08f * s
-        val highlightComp = if (brightRatio > 0.08f || indoor) 0.22f * s else 0.12f * s
-        val contrastAmt = if (indoor) 0.12f * s else 0.22f * s
-        val vibranceAmt = if (indoor) 0.12f * s else 0.18f * s
+        val warmCast = avgR > avgB + 10f
+        val indoor = avgY < 125f || (warmCast && avgY < 150f) || darkRatio > 0.18f
+
+        // Levels stretch — gentle, avoid plastic look
+        val black = if (indoor) (p5 * 0.65f) else (p5 * 0.4f)
+        val white = if (indoor) (255f - (255 - p95) * 0.35f) else (255f - (255 - p95) * 0.2f)
+        val range = (white - black).coerceAtLeast(64f)
+
+        // WB
+        val avg = (avgR + avgG + avgB) / 3f
+        var gainR = (avg / avgR.coerceAtLeast(1f)).coerceIn(0.90f, 1.10f)
+        var gainG = (avg / avgG.coerceAtLeast(1f)).coerceIn(0.90f, 1.10f)
+        var gainB = (avg / avgB.coerceAtLeast(1f)).coerceIn(0.90f, 1.10f)
+        if (indoor && warmCast) {
+            gainR *= 0.96f
+            gainB *= 1.05f
+        }
+        val wbT = if (indoor) s * 0.9f else s * 0.55f
+        val gR = lerp(1f, gainR, wbT)
+        val gG = lerp(1f, gainG, wbT)
+        val gB = lerp(1f, gainB, wbT)
+
+        val shadowLift = if (indoor) 0.22f * s else 0.06f * s
+        val highlightComp = if (indoor || brightRatio > 0.06f) 0.18f * s else 0.08f * s
+        val contrastAmt = if (indoor) 0.06f * s else 0.16f * s
+        val vibranceAmt = if (indoor) 0.08f * s else 0.14f * s
+        val exposureBias = if (indoor && avgY < 100f) (0.06f * s) else 0f
 
         val out = IntArray(n)
         for (i in pixels.indices) {
             val p = pixels[i]
             val a = (p ushr 24) and 0xFF
-            var r = ((p shr 16) and 0xFF) * gR
-            var g = ((p shr 8) and 0xFF) * gG
-            var b = (p and 0xFF) * gB
+            var r = ((p shr 16) and 0xFF).toFloat()
+            var g = ((p shr 8) and 0xFF).toFloat()
+            var b = (p and 0xFF).toFloat()
 
-            // Luma-based shadow lift + highlight roll-off
-            var y = (r * 0.3f + g * 0.59f + b * 0.11f) / 255f
-            val y2 = shadowHighlightCurve(y, shadowLift, highlightComp)
-            if (y > 1e-3f) {
-                val scale = y2 / y
-                r *= scale
-                g *= scale
-                b *= scale
+            // Levels
+            r = ((r - black) / range * 255f).coerceIn(0f, 255f)
+            g = ((g - black) / range * 255f).coerceIn(0f, 255f)
+            b = ((b - black) / range * 255f).coerceIn(0f, 255f)
+
+            r *= gR
+            g *= gG
+            b *= gB
+
+            if (exposureBias > 0f) {
+                r = (r + exposureBias * 255f).coerceIn(0f, 255f)
+                g = (g + exposureBias * 255f).coerceIn(0f, 255f)
+                b = (b + exposureBias * 255f).coerceIn(0f, 255f)
             }
 
-            // Soft contrast around midtones (weaker indoors)
+            var y = (r * 0.3f + g * 0.59f + b * 0.11f) / 255f
+            val y2 = shadowHighlightCurve(y, shadowLift, highlightComp)
+            if (y > 1e-4f) {
+                val scale = y2 / y
+                r = (r * scale).coerceIn(0f, 255f)
+                g = (g * scale).coerceIn(0f, 255f)
+                b = (b * scale).coerceIn(0f, 255f)
+            }
+
             r = toneContrast(r / 255f, contrastAmt) * 255f
             g = toneContrast(g / 255f, contrastAmt) * 255f
             b = toneContrast(b / 255f, contrastAmt) * 255f
@@ -111,38 +137,26 @@ object DaylightEnhancer {
             g = vg.coerceIn(0f, 255f)
             b = vb.coerceIn(0f, 255f)
 
-            // Outdoor only: tiny warm bias; indoor: none
-            if (!indoor) {
-                r = (r + 1.5f * s).coerceIn(0f, 255f)
-                b = (b - 0.8f * s).coerceIn(0f, 255f)
-            }
-
             out[i] = (a shl 24) or (r.toInt().coerceIn(0, 255) shl 16) or
                 (g.toInt().coerceIn(0, 255) shl 8) or b.toInt().coerceIn(0, 255)
         }
 
-        // Local contrast — softer indoors
-        localContrast(out, w, h, amount = if (indoor) 0.14f * s else 0.24f * s)
+        localContrast(out, w, h, amount = if (indoor) 0.10f * s else 0.20f * s)
 
         val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         result.setPixels(out, 0, w, 0, 0, w, h)
-        return if (s > 0.25f) mildClarity(result, if (indoor) 0.18f * s else 0.28f * s) else result
+        return if (s > 0.3f && !indoor) mildClarity(result, 0.22f * s) else result
     }
 
-    /** Lift shadows, compress highlights in linear-ish luma space. */
     private fun shadowHighlightCurve(y: Float, shadowLift: Float, highlightComp: Float): Float {
         var v = y.coerceIn(0f, 1f)
-        // Shadows: lift with (1 - (1-y)^k)
-        if (shadowLift > 0f && v < 0.45f) {
-            val t = v / 0.45f
-            val lifted = v + shadowLift * (1f - t) * (1f - v)
-            v = lifted
+        if (shadowLift > 0f && v < 0.5f) {
+            val t = v / 0.5f
+            v = v + shadowLift * (1f - t) * (1f - v) * 1.1f
         }
-        // Highlights: soft knee
-        if (highlightComp > 0f && v > 0.65f) {
-            val t = (v - 0.65f) / 0.35f
-            val compressed = 0.65f + 0.35f * (t / (1f + highlightComp * t))
-            v = compressed
+        if (highlightComp > 0f && v > 0.7f) {
+            val t = (v - 0.7f) / 0.3f
+            v = 0.7f + 0.3f * (t / (1f + highlightComp * 1.2f * t))
         }
         return v.coerceIn(0f, 1f)
     }
@@ -151,7 +165,7 @@ object DaylightEnhancer {
         val c = x.coerceIn(0f, 1f)
         if (amount < 0.01f) return c
         val mid = 0.5f + (c - 0.5f) * (1f + amount)
-        return lerp(c, mid.coerceIn(0f, 1f), 0.85f)
+        return lerp(c, mid.coerceIn(0f, 1f), 0.7f)
     }
 
     private fun vibrance(r: Float, g: Float, b: Float, amount: Float): Triple<Float, Float, Float> {
@@ -161,11 +175,7 @@ object DaylightEnhancer {
         val sat = if (maxc > 1f) (maxc - minc) / maxc else 0f
         val boost = amount * (1f - sat)
         val avg = (r + g + b) / 3f
-        return Triple(
-            r + (r - avg) * boost,
-            g + (g - avg) * boost,
-            b + (b - avg) * boost
-        )
+        return Triple(r + (r - avg) * boost, g + (g - avg) * boost, b + (b - avg) * boost)
     }
 
     private fun localContrast(px: IntArray, w: Int, h: Int, amount: Float) {
@@ -188,21 +198,18 @@ object DaylightEnhancer {
                         c++
                     }
                 }
-                lr /= c
-                lg /= c
-                lb /= c
+                lr /= c; lg /= c; lb /= c
                 val p = copy[i]
                 val a = (p ushr 24) and 0xFF
                 val r = (p shr 16) and 0xFF
                 val g = (p shr 8) and 0xFF
                 val b = p and 0xFF
-                // Protect near-black from going more black
                 val y = (r * 3 + g * 6 + b) / 10
-                val localAmt = if (y < 35) amount * 0.35f else amount
-                val nr = (r + (r - lr) * localAmt).toInt().coerceIn(0, 255)
-                val ng = (g + (g - lg) * localAmt).toInt().coerceIn(0, 255)
-                val nb = (b + (b - lb) * localAmt).toInt().coerceIn(0, 255)
-                px[i] = (a shl 24) or (nr shl 16) or (ng shl 8) or nb
+                val localAmt = if (y < 40) amount * 0.25f else amount
+                px[i] = (a shl 24) or
+                    ((r + (r - lr) * localAmt).toInt().coerceIn(0, 255) shl 16) or
+                    ((g + (g - lg) * localAmt).toInt().coerceIn(0, 255) shl 8) or
+                    (b + (b - lb) * localAmt).toInt().coerceIn(0, 255)
             }
         }
     }
@@ -211,17 +218,16 @@ object DaylightEnhancer {
         val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(out)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        val c = 1f + amount * 0.18f
-        val t = (1f - c) * 12f
-        val cm = ColorMatrix(
-            floatArrayOf(
+        val c = 1f + amount * 0.14f
+        val t = (1f - c) * 10f
+        paint.colorFilter = ColorMatrixColorFilter(
+            ColorMatrix(floatArrayOf(
                 c, 0f, 0f, 0f, t,
                 0f, c, 0f, 0f, t,
                 0f, 0f, c, 0f, t,
                 0f, 0f, 0f, 1f, 0f
-            )
+            ))
         )
-        paint.colorFilter = ColorMatrixColorFilter(cm)
         canvas.drawBitmap(src, 0f, 0f, paint)
         return out
     }
