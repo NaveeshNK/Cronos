@@ -89,7 +89,7 @@ fun CronosApp() {
     val context = LocalContext.current
     val cameraPermission = rememberPermissionState(Manifest.permission.CAMERA)
     var screen by remember { mutableStateOf<Screen>(Screen.Camera) }
-    var strength by remember { mutableFloatStateOf(0.68f) }
+    var strength by remember { mutableFloatStateOf(0.78f) }
     var processing by remember { mutableStateOf(false) }
     var useFront by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -235,7 +235,7 @@ private fun CameraBody(
                 .padding(top = 48.dp, start = 20.dp)
         ) {
             Text("CRONOS", color = Color(0xFFE8B86D), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
-            Text("Smart enhance · vivid natural", color = Color(0xFF90A4AE), style = MaterialTheme.typography.bodySmall)
+            Text("iPhone-style color · chroma first", color = Color(0xFF90A4AE), style = MaterialTheme.typography.bodySmall)
         }
 
         Row(

@@ -1,18 +1,28 @@
 package com.cronos.camera.enhance
 
 import android.graphics.Bitmap
+import kotlin.math.atan2
+import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 /**
- * Pipeline v5 — visible "finished" color (iPhone-direction) without
- * cracked/posterized shadows from v3.
+ * Pipeline v6 — COLOR-FIRST, inspired by measured iPhone rendering traits:
  *
- * Stronger midtone color + clarity; shadows use smooth lift only.
+ * Research summary (not a pixel-perfect clone of Apple's closed ISP):
+ * - Daylight iPhone sits ~120–128% relative saturation (vivid, controlled)
+ * - Indoors iPhone KEEPS warmth (~9–13 pts yellow) rather than scrubbing to gray (Pixel-style)
+ * - "Vibrant" style deepens chroma without a global Instagram filter
+ * - Tone/color adjusted per region of color space, not one matrix on everything
+ * - Luma structure preserved; chroma is where the "pop" lives
+ *
+ * v6 avoids local-contrast on darks (no cracked shadows).
  */
 object DaylightEnhancer {
 
-    fun enhance(source: Bitmap, strength: Float = 0.68f): Bitmap {
+    fun enhance(source: Bitmap, strength: Float = 0.78f): Bitmap {
         val s = strength.coerceIn(0f, 1f)
         if (s <= 0.01f) return source.copy(Bitmap.Config.ARGB_8888, false)
 
@@ -29,213 +39,135 @@ object DaylightEnhancer {
         var sumG = 0.0
         var sumB = 0.0
         var sumY = 0.0
-        val hist = IntArray(256)
         for (p in pixels) {
             val r = (p shr 16) and 0xFF
             val g = (p shr 8) and 0xFF
             val b = p and 0xFF
             sumR += r; sumG += g; sumB += b
-            val y = (r * 3 + g * 6 + b) / 10
-            sumY += y
-            hist[y.coerceIn(0, 255)]++
+            sumY += (r * 3 + g * 6 + b) / 10
         }
         val avgR = (sumR / n).toFloat()
         val avgG = (sumG / n).toFloat()
         val avgB = (sumB / n).toFloat()
         val avgY = (sumY / n).toFloat()
 
-        fun percentile(p: Float): Int {
-            val target = (n * p).toInt().coerceIn(0, n - 1)
-            var acc = 0
-            for (i in 0..255) {
-                acc += hist[i]
-                if (acc >= target) return i
-            }
-            return 255
-        }
-        val p3 = percentile(0.03f)
-        val p97 = percentile(0.97f)
+        val warmCast = avgR > avgB + 6f
+        val indoor = avgY < 135f || warmCast
 
-        val warmCast = avgR > avgB + 8f
-        val indoor = avgY < 130f || warmCast
-
-        // Moderate levels — enough pop, not extreme
-        val black = if (indoor) p3 * 0.35f else p3 * 0.2f
-        val white = 255f - (255 - p97) * 0.2f
-        val range = (white - black).coerceAtLeast(100f)
-
-        // Visible but controlled WB
+        // iPhone indoor: KEEP warmth; outdoor: mild neutral + slight warmth
+        // Do NOT fully gray-wall the scene (that was killing "color difference")
         val avg = (avgR + avgG + avgB) / 3f
-        var gainR = (avg / max(avgR, 1f)).coerceIn(0.92f, 1.08f)
-        var gainG = (avg / max(avgG, 1f)).coerceIn(0.92f, 1.08f)
-        var gainB = (avg / max(avgB, 1f)).coerceIn(0.92f, 1.08f)
-        if (indoor && warmCast) {
-            gainR *= 0.97f
-            gainB *= 1.04f
+        var gainR = (avg / max(avgR, 1f))
+        var gainG = (avg / max(avgG, 1f))
+        var gainB = (avg / max(avgB, 1f))
+        if (indoor) {
+            // Partial neutralize only — retain golden indoor bias
+            gainR = lerp(1f, gainR.coerceIn(0.94f, 1.06f), 0.35f)
+            gainG = lerp(1f, gainG.coerceIn(0.94f, 1.06f), 0.35f)
+            gainB = lerp(1f, gainB.coerceIn(0.94f, 1.06f), 0.35f)
+            // Explicit warm lean like measured iPhone indoors
+            gainR *= 1.02f
+            gainB *= 0.98f
+        } else {
+            gainR = gainR.coerceIn(0.95f, 1.05f)
+            gainG = gainG.coerceIn(0.95f, 1.05f)
+            gainB = gainB.coerceIn(0.95f, 1.05f)
+            gainR *= 1.01f // mild outdoor warmth
         }
-        val wbT = s * 0.85f
+        val wbT = s * 0.7f
         val gR = lerp(1f, gainR, wbT)
         val gG = lerp(1f, gainG, wbT)
         val gB = lerp(1f, gainB, wbT)
 
-        // Color pop — main fix vs flat v4
-        val vibranceAmt = if (indoor) 0.28f * s else 0.34f * s
-        val saturationAmt = if (indoor) 0.10f * s else 0.14f * s
-        val midContrast = if (indoor) 0.14f * s else 0.22f * s
-        val shadowLift = if (indoor) 0.14f * s else 0.05f * s
-        val highlightComp = 0.14f * s
-        val exposure = if (indoor && avgY < 105f) 0.04f * s else 0.01f * s
+        // Chroma intensity: stronger than v5 so Before/After is obvious
+        // Maps to ~iPhone "Color" axis toward Vibrant
+        val chromaBoost = if (indoor) 0.55f * s else 0.65f * s
+        val midTonePunch = if (indoor) 0.12f * s else 0.18f * s
 
         val out = IntArray(n)
         for (i in pixels.indices) {
             val p = pixels[i]
             val a = (p ushr 24) and 0xFF
-            var r = ((p shr 16) and 0xFF).toFloat()
-            var g = ((p shr 8) and 0xFF).toFloat()
-            var b = (p and 0xFF).toFloat()
+            var r = ((p shr 16) and 0xFF) * gR
+            var g = ((p shr 8) and 0xFF) * gG
+            var b = (p and 0xFF) * gB
+            r = r.coerceIn(0f, 255f)
+            g = g.coerceIn(0f, 255f)
+            b = b.coerceIn(0f, 255f)
 
-            r = ((r - black) / range * 255f).coerceIn(0f, 255f)
-            g = ((g - black) / range * 255f).coerceIn(0f, 255f)
-            b = ((b - black) / range * 255f).coerceIn(0f, 255f)
+            // --- YCbCr: process COLOR on chroma, keep structure on luma ---
+            var y = 0.299f * r + 0.587f * g + 0.114f * b
+            var cb = 128f - 0.168736f * r - 0.331264f * g + 0.5f * b
+            var cr = 128f + 0.5f * r - 0.418688f * g - 0.081312f * b
 
-            r *= gR; g *= gG; b *= gB
+            // Soft S-curve on luma only (tone) — mild so no posterization
+            val yn = (y / 255f).coerceIn(0f, 1f)
+            val yCurve = softSCurve(yn, midTonePunch)
+            y = (yCurve * 255f).coerceIn(0f, 255f)
 
-            if (exposure > 0f) {
-                val e = 1f + exposure
-                r = (r * e).coerceIn(0f, 255f)
-                g = (g * e).coerceIn(0f, 255f)
-                b = (b * e).coerceIn(0f, 255f)
-            }
+            // Chroma vector from neutral axis
+            val dCb = cb - 128f
+            val dCr = cr - 128f
+            val chroma = sqrt(dCb * dCb + dCr * dCr)
 
-            // Smooth shadow/highlight on luma
-            var y = (0.2126f * r + 0.7152f * g + 0.0722f * b) / 255f
-            if (shadowLift > 0f && y < 0.5f) {
-                val lifted = smoothPow(y, 1f - shadowLift * 0.5f)
-                if (y > 1e-4f) {
-                    val scale = lifted / y
-                    r = (r * scale).coerceIn(0f, 255f)
-                    g = (g * scale).coerceIn(0f, 255f)
-                    b = (b * scale).coerceIn(0f, 255f)
-                    y = lifted
-                }
-            }
-            if (highlightComp > 0f && y > 0.72f) {
-                val t = (y - 0.72f) / 0.28f
-                val ny = 0.72f + 0.28f * (t / (1f + highlightComp * t))
-                val scale = ny / y.coerceAtLeast(1e-4f)
-                r = (r * scale).coerceIn(0f, 255f)
-                g = (g * scale).coerceIn(0f, 255f)
-                b = (b * scale).coerceIn(0f, 255f)
-                y = ny
-            }
+            // Hue angle for selective boost (iPhone-like per-color behavior)
+            val hue = atan2(dCr, dCb) // -PI..PI
+            val hueBoost = hueDependentBoost(hue) // 0.85..1.35
 
-            // Mid contrast — skip deepest shadows to avoid cracks
-            if (y > 0.08f) {
-                r = softContrast(r / 255f, midContrast) * 255f
-                g = softContrast(g / 255f, midContrast) * 255f
-                b = softContrast(b / 255f, midContrast) * 255f
-            }
+            // Vibrance: boost weak chroma more than already vivid
+            val normC = (chroma / 90f).coerceIn(0f, 1f)
+            val vibranceFactor = 1f + chromaBoost * hueBoost * (1f - normC * 0.55f)
 
-            // Vibrance + light saturation (color you can see)
-            var (vr, vg, vb) = vibrance(r, g, b, vibranceAmt)
-            val sat = saturation(vr, vg, vb, saturationAmt)
-            vr = sat.first; vg = sat.second; vb = sat.third
+            // Protect near-neutrals slightly less than pure gray so wood/cloth still pop
+            val neutralProtect = if (chroma < 8f) 0.35f else if (chroma < 18f) 0.7f else 1f
+            val factor = 1f + (vibranceFactor - 1f) * neutralProtect
 
-            // Tiny dither only in very dark (anti-band), not visible texture
-            val dy = 0.2126f * vr + 0.7152f * vg + 0.0722f * vb
-            val dither = if (dy < 28f) shadowDither(i, w) * 0.8f else 0f
+            cb = 128f + dCb * factor
+            cr = 128f + dCr * factor
+
+            // YCbCr -> RGB
+            val c = y - 16f * 0f // full range JPEG-style
+            r = y + 1.402f * (cr - 128f)
+            g = y - 0.344136f * (cb - 128f) - 0.714136f * (cr - 128f)
+            b = y + 1.772f * (cb - 128f)
 
             out[i] = (a shl 24) or
-                ((vr + dither).toInt().coerceIn(0, 255) shl 16) or
-                ((vg + dither).toInt().coerceIn(0, 255) shl 8) or
-                (vb + dither).toInt().coerceIn(0, 255)
+                (r.toInt().coerceIn(0, 255) shl 16) or
+                (g.toInt().coerceIn(0, 255) shl 8) or
+                b.toInt().coerceIn(0, 255)
         }
-
-        // Mild local contrast only on mid/bright — clarity without cracking darks
-        localContrastSafe(out, w, h, amount = 0.16f * s, minLuma = 55)
 
         val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         result.setPixels(out, 0, w, 0, 0, w, h)
         return result
     }
 
-    private fun smoothPow(x: Float, exp: Float): Float {
-        if (x <= 0f) return 0f
-        return Math.pow(x.toDouble(), exp.toDouble()).toFloat()
+    /**
+     * Hue-dependent multipliers (approx):
+     * reds/oranges (wood, doors), blues (fabric/sky), greens — stronger;
+     * cyans/magentas moderate; pure yellows milder to avoid sickly walls.
+     */
+    private fun hueDependentBoost(hue: Float): Float {
+        // Map atan2(dCr, dCb) roughly to sectors
+        val deg = Math.toDegrees(hue.toDouble()).toFloat()
+        // Boost profile
+        return when {
+            deg > 20f && deg < 90f -> 1.28f   // reds / skin-wood
+            deg >= 90f && deg < 150f -> 1.12f // magentas
+            deg >= -180f && deg < -120f -> 1.30f // blues
+            deg >= -120f && deg < -40f -> 1.18f // cyans
+            deg >= -40f && deg <= 20f -> 1.05f // yellow-green (walls caution)
+            else -> 1.15f
+        }
     }
 
-    private fun softContrast(x: Float, amount: Float): Float {
-        if (amount < 0.01f) return x.coerceIn(0f, 1f)
+    private fun softSCurve(x: Float, amount: Float): Float {
+        if (amount < 0.01f) return x
         val c = x.coerceIn(0f, 1f)
-        val mid = 0.5f + (c - 0.5f) * (1f + amount)
-        return lerp(c, mid.coerceIn(0f, 1f), 0.75f)
-    }
-
-    private fun vibrance(r: Float, g: Float, b: Float, amount: Float): Triple<Float, Float, Float> {
-        if (amount < 0.01f) return Triple(r, g, b)
-        val maxc = max(r, max(g, b))
-        val minc = min(r, min(g, b))
-        val sat = if (maxc > 1f) (maxc - minc) / maxc else 0f
-        val boost = amount * (1f - sat * 0.85f)
-        val avg = (r + g + b) / 3f
-        return Triple(
-            (r + (r - avg) * boost).coerceIn(0f, 255f),
-            (g + (g - avg) * boost).coerceIn(0f, 255f),
-            (b + (b - avg) * boost).coerceIn(0f, 255f)
-        )
-    }
-
-    private fun saturation(r: Float, g: Float, b: Float, amount: Float): Triple<Float, Float, Float> {
-        if (amount < 0.01f) return Triple(r, g, b)
-        val gray = 0.2126f * r + 0.7152f * g + 0.0722f * b
-        return Triple(
-            (gray + (r - gray) * (1f + amount)).coerceIn(0f, 255f),
-            (gray + (g - gray) * (1f + amount)).coerceIn(0f, 255f),
-            (gray + (b - gray) * (1f + amount)).coerceIn(0f, 255f)
-        )
-    }
-
-    private fun shadowDither(index: Int, w: Int): Float {
-        val x = index % w
-        val y = index / w
-        return when ((x and 1) or ((y and 1) shl 1)) {
-            0 -> -0.4f
-            1 -> 0.2f
-            2 -> 0.4f
-            else -> -0.2f
-        }
-    }
-
-    private fun localContrastSafe(px: IntArray, w: Int, h: Int, amount: Float, minLuma: Int) {
-        if (amount < 0.02f) return
-        val copy = px.copyOf()
-        for (y in 1 until h - 1) {
-            for (x in 1 until w - 1) {
-                val i = y * w + x
-                val p = copy[i]
-                val r = (p shr 16) and 0xFF
-                val g = (p shr 8) and 0xFF
-                val b = p and 0xFF
-                val yL = (r * 3 + g * 6 + b) / 10
-                if (yL < minLuma) continue
-                var lr = 0; var lg = 0; var lb = 0
-                for (dy in -1..1) for (dx in -1..1) {
-                    val q = copy[(y + dy) * w + (x + dx)]
-                    lr += (q shr 16) and 0xFF
-                    lg += (q shr 8) and 0xFF
-                    lb += q and 0xFF
-                }
-                lr /= 9; lg /= 9; lb /= 9
-                val a = (p ushr 24) and 0xFF
-                // Soften amount near threshold
-                val fade = ((yL - minLuma) / 40f).coerceIn(0f, 1f)
-                val amt = amount * fade
-                px[i] = (a shl 24) or
-                    ((r + (r - lr) * amt).toInt().coerceIn(0, 255) shl 16) or
-                    ((g + (g - lg) * amt).toInt().coerceIn(0, 255) shl 8) or
-                    (b + (b - lb) * amt).toInt().coerceIn(0, 255)
-            }
-        }
+        // smoothstep-based S
+        val s = c * c * (3f - 2f * c)
+        val mid = 0.5f + (s - 0.5f) * (1f + amount * 1.4f)
+        return lerp(c, mid.coerceIn(0f, 1f), 0.85f)
     }
 
     private fun lerp(a: Float, b: Float, t: Float) = a + (b - a) * t
