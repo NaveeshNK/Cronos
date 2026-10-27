@@ -89,7 +89,7 @@ fun CronosApp() {
     val context = LocalContext.current
     val cameraPermission = rememberPermissionState(Manifest.permission.CAMERA)
     var screen by remember { mutableStateOf<Screen>(Screen.Camera) }
-    var strength by remember { mutableFloatStateOf(0.42f) }
+    var strength by remember { mutableFloatStateOf(0.68f) }
     var processing by remember { mutableStateOf(false) }
     var useFront by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -205,7 +205,7 @@ private fun CameraBody(
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         AndroidView(
             factory = { ctx ->
-                PreviewView(ctx).apply { scaleType = PreviewView.ScaleType.FILL_CENTER }
+                PreviewView(ctx).apply { scaleType = PreviewView.ScaleType.FIT_CENTER }
             },
             modifier = Modifier.fillMaxSize(),
             update = { previewView ->
@@ -235,7 +235,7 @@ private fun CameraBody(
                 .padding(top = 48.dp, start = 20.dp)
         ) {
             Text("CRONOS", color = Color(0xFFE8B86D), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
-            Text("Smart enhance · natural indoor", color = Color(0xFF90A4AE), style = MaterialTheme.typography.bodySmall)
+            Text("Smart enhance · vivid natural", color = Color(0xFF90A4AE), style = MaterialTheme.typography.bodySmall)
         }
 
         Row(
