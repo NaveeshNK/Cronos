@@ -65,6 +65,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.cronos.camera.enhance.BurstMerger
 import com.cronos.camera.enhance.DaylightEnhancer
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
@@ -89,7 +90,7 @@ fun CronosApp() {
     val context = LocalContext.current
     val cameraPermission = rememberPermissionState(Manifest.permission.CAMERA)
     var screen by remember { mutableStateOf<Screen>(Screen.Camera) }
-    var strength by remember { mutableFloatStateOf(0.75f) }
+    var strength by remember { mutableFloatStateOf(0.80f) }
     var processing by remember { mutableStateOf(false) }
     var useFront by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -105,11 +106,18 @@ fun CronosApp() {
                     useFront = useFront,
                     processing = processing,
                     onFlip = { useFront = !useFront },
-                    onCapturedFile = { file ->
+                    onCapturedFiles = { files ->
                         processing = true
                         scope.launch {
                             try {
-                                val original = withContext(Dispatchers.IO) { decodeAndOrient(file) }
+                                val frames = withContext(Dispatchers.IO) {
+                                    files.map { decodeAndOrient(it) }
+                                }
+                                val original = withContext(Dispatchers.Default) {
+                                    BurstMerger.merge(frames)
+                                }
+                                // recycle intermediates except if same ref
+                                frames.forEach { if (it != original) runCatching { it.recycle() } }
                                 val enhanced = withContext(Dispatchers.Default) {
                                     DaylightEnhancer.enhance(original, strength)
                                 }
@@ -118,7 +126,7 @@ fun CronosApp() {
                                 Toast.makeText(context, e.message ?: "Capture failed", Toast.LENGTH_SHORT).show()
                             } finally {
                                 processing = false
-                                runCatching { file.delete() }
+                                files.forEach { runCatching { it.delete() } }
                             }
                         }
                     }
@@ -194,7 +202,7 @@ private fun CameraBody(
     useFront: Boolean,
     processing: Boolean,
     onFlip: () -> Unit,
-    onCapturedFile: (File) -> Unit
+    onCapturedFiles: (List<File>) -> Unit
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -235,7 +243,7 @@ private fun CameraBody(
                 .padding(top = 48.dp, start = 20.dp)
         ) {
             Text("CRONOS", color = Color(0xFFE8B86D), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
-            Text("Color boost · same brightness", color = Color(0xFF90A4AE), style = MaterialTheme.typography.bodySmall)
+            Text("Burst merge · color boost", color = Color(0xFF90A4AE), style = MaterialTheme.typography.bodySmall)
         }
 
         Row(
@@ -260,24 +268,40 @@ private fun CameraBody(
                     .background(if (processing) Color.Gray else Color(0xFFE8B86D))
                     .clickable(enabled = !processing) {
                         val capture = imageCapture ?: return@clickable
-                        val file = File(context.cacheDir, "cronos_${System.currentTimeMillis()}.jpg")
-                        val options = ImageCapture.OutputFileOptions.Builder(file).build()
-                        capture.takePicture(
-                            options,
-                            executor,
-                            object : ImageCapture.OnImageSavedCallback {
-                                override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                                    ContextCompat.getMainExecutor(context).execute {
-                                        onCapturedFile(file)
-                                    }
+                        val burstCount = 3
+                        val files = mutableListOf<File>()
+                        fun captureNext(index: Int) {
+                            if (index >= burstCount) {
+                                ContextCompat.getMainExecutor(context).execute {
+                                    onCapturedFiles(files.toList())
                                 }
-                                override fun onError(exception: ImageCaptureException) {
-                                    ContextCompat.getMainExecutor(context).execute {
-                                        Toast.makeText(context, exception.message ?: "Capture error", Toast.LENGTH_SHORT).show()
-                                    }
-                                }
+                                return
                             }
-                        )
+                            val file = File(context.cacheDir, "cronos_${System.currentTimeMillis()}_$index.jpg")
+                            val options = ImageCapture.OutputFileOptions.Builder(file).build()
+                            capture.takePicture(
+                                options,
+                                executor,
+                                object : ImageCapture.OnImageSavedCallback {
+                                    override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+                                        files.add(file)
+                                        captureNext(index + 1)
+                                    }
+                                    override fun onError(exception: ImageCaptureException) {
+                                        if (files.isNotEmpty()) {
+                                            ContextCompat.getMainExecutor(context).execute {
+                                                onCapturedFiles(files.toList())
+                                            }
+                                        } else {
+                                            ContextCompat.getMainExecutor(context).execute {
+                                                Toast.makeText(context, exception.message ?: "Capture error", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    }
+                                }
+                            )
+                        }
+                        captureNext(0)
                     },
                 contentAlignment = Alignment.Center
             ) {
