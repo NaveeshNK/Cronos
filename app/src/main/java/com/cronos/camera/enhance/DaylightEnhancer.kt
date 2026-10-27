@@ -47,11 +47,11 @@ object DaylightEnhancer {
         var gainG = 1f
         var gainB = 1f
         if (indoor && warmCast) {
-            gainR = 1.02f
-            gainB = 0.985f
+            gainR = 1.012f
+            gainB = 0.992f
         }
 
-        val chromaBoost = if (indoor) 0.85f * s else 0.95f * s
+        val chromaBoost = if (indoor) 0.82f * s else 0.92f * s
 
         val out = IntArray(n)
         var sumY1 = 0.0

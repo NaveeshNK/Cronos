@@ -90,8 +90,9 @@ fun CronosApp() {
     val context = LocalContext.current
     val cameraPermission = rememberPermissionState(Manifest.permission.CAMERA)
     var screen by remember { mutableStateOf<Screen>(Screen.Camera) }
-    var strength by remember { mutableFloatStateOf(0.80f) }
+    val strength = 0.80f
     var processing by remember { mutableStateOf(false) }
+    var burstStatus by remember { mutableStateOf<String?>(null) }
     var useFront by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
@@ -105,9 +106,12 @@ fun CronosApp() {
                 CameraBody(
                     useFront = useFront,
                     processing = processing,
+                    burstStatus = burstStatus,
                     onFlip = { useFront = !useFront },
+                    onBurstProgress = { burstStatus = it },
                     onCapturedFiles = { files ->
                         processing = true
+                        burstStatus = "Merging…"
                         scope.launch {
                             try {
                                 val frames = withContext(Dispatchers.IO) {
@@ -126,6 +130,7 @@ fun CronosApp() {
                                 Toast.makeText(context, e.message ?: "Capture failed", Toast.LENGTH_SHORT).show()
                             } finally {
                                 processing = false
+                                burstStatus = null
                                 files.forEach { runCatching { it.delete() } }
                             }
                         }
@@ -159,19 +164,7 @@ fun CronosApp() {
             ReviewBody(
                 original = s.original,
                 enhanced = s.enhanced,
-                strength = strength,
                 processing = processing,
-                onStrength = { strength = it },
-                onReprocess = {
-                    processing = true
-                    scope.launch {
-                        val next = withContext(Dispatchers.Default) {
-                            DaylightEnhancer.enhance(s.original, strength)
-                        }
-                        screen = Screen.Review(s.original, next)
-                        processing = false
-                    }
-                },
                 onRetake = {
                     runCatching { s.original.recycle() }
                     runCatching { s.enhanced.recycle() }
@@ -201,8 +194,10 @@ fun CronosApp() {
 private fun CameraBody(
     useFront: Boolean,
     processing: Boolean,
+    burstStatus: String?,
     onFlip: () -> Unit,
-    onCapturedFiles: (List<File>) -> Unit
+    onCapturedFiles: (List<File>) -> Unit,
+    onBurstProgress: (String?) -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -224,7 +219,7 @@ private fun CameraBody(
                         it.surfaceProvider = previewView.surfaceProvider
                     }
                     val capture = ImageCapture.Builder()
-                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                         .build()
                     imageCapture = capture
                     val selector = if (useFront) CameraSelector.DEFAULT_FRONT_CAMERA
@@ -237,13 +232,27 @@ private fun CameraBody(
             }
         )
 
+
+        // Rule-of-thirds grid
+        androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
+            val c = Color.White.copy(alpha = 0.25f)
+            val stroke = 1.5f
+            drawLine(c, androidx.compose.ui.geometry.Offset(size.width / 3f, 0f), androidx.compose.ui.geometry.Offset(size.width / 3f, size.height), stroke)
+            drawLine(c, androidx.compose.ui.geometry.Offset(2f * size.width / 3f, 0f), androidx.compose.ui.geometry.Offset(2f * size.width / 3f, size.height), stroke)
+            drawLine(c, androidx.compose.ui.geometry.Offset(0f, size.height / 3f), androidx.compose.ui.geometry.Offset(size.width, size.height / 3f), stroke)
+            drawLine(c, androidx.compose.ui.geometry.Offset(0f, 2f * size.height / 3f), androidx.compose.ui.geometry.Offset(size.width, 2f * size.height / 3f), stroke)
+        }
+
         Column(
             Modifier
                 .align(Alignment.TopStart)
                 .padding(top = 48.dp, start = 20.dp)
         ) {
             Text("CRONOS", color = Color(0xFFE8B86D), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
-            Text("Burst merge · color boost", color = Color(0xFF90A4AE), style = MaterialTheme.typography.bodySmall)
+            Text("3-frame burst · auto color", color = Color(0xFF90A4AE), style = MaterialTheme.typography.bodySmall)
+            if (burstStatus != null) {
+                Text(burstStatus, color = Color(0xFFE8B86D), style = MaterialTheme.typography.bodyMedium)
+            }
         }
 
         Row(
@@ -273,9 +282,13 @@ private fun CameraBody(
                         fun captureNext(index: Int) {
                             if (index >= burstCount) {
                                 ContextCompat.getMainExecutor(context).execute {
+                                    onBurstProgress(null)
                                     onCapturedFiles(files.toList())
                                 }
                                 return
+                            }
+                            ContextCompat.getMainExecutor(context).execute {
+                                onBurstProgress("Capturing ${index + 1}/$burstCount…")
                             }
                             val file = File(context.cacheDir, "cronos_${System.currentTimeMillis()}_$index.jpg")
                             val options = ImageCapture.OutputFileOptions.Builder(file).build()
@@ -319,10 +332,7 @@ private fun CameraBody(
 private fun ReviewBody(
     original: Bitmap,
     enhanced: Bitmap,
-    strength: Float,
     processing: Boolean,
-    onStrength: (Float) -> Unit,
-    onReprocess: () -> Unit,
     onRetake: () -> Unit,
     onSave: () -> Unit
 ) {
@@ -354,14 +364,9 @@ private fun ReviewBody(
             contentScale = ContentScale.Fit
         )
         Spacer(Modifier.height(12.dp))
-        Text("Enhance strength ${(strength * 100).toInt()}%", color = Color(0xFFB0BEC5), style = MaterialTheme.typography.labelMedium)
-        Slider(value = strength, onValueChange = onStrength, valueRange = 0f..1f)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = { showOriginal = !showOriginal }) {
                 Text(if (showOriginal) "Show enhanced" else "Show original", color = Color(0xFF7EB8D4))
-            }
-            TextButton(onClick = onReprocess, enabled = !processing) {
-                Text("Re-apply", color = Color(0xFFE8B86D))
             }
         }
         Spacer(Modifier.height(8.dp))
