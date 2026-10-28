@@ -8,11 +8,15 @@ import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
- * v15 — neutral WB (no yellow, no blue), brighter image.
+ * v16 — single-frame path gets stronger smooth luma denoise.
  */
 object DaylightEnhancer {
 
-    fun enhance(source: Bitmap, strength: Float = 0.85f): Bitmap {
+    fun enhance(
+        source: Bitmap,
+        strength: Float = 0.85f,
+        singleFrame: Boolean = false
+    ): Bitmap {
         val s = strength.coerceIn(0f, 1f)
         if (s <= 0.01f) return source.copy(Bitmap.Config.ARGB_8888, false)
 
@@ -26,6 +30,12 @@ object DaylightEnhancer {
         input.getPixels(pixels, 0, w, 0, 0, w, h)
 
         chromaDenoiseSmooth(pixels, w, h)
+        // Extra luma denoise when multi-frame was skipped (more sensor noise left)
+        if (singleFrame) {
+            lumaDenoiseSmooth(pixels, w, h, strength = 0.55f * s)
+        } else {
+            lumaDenoiseSmooth(pixels, w, h, strength = 0.22f * s)
+        }
 
         var sumY0 = 0.0
         var sumR = 0.0
@@ -44,17 +54,14 @@ object DaylightEnhancer {
         val avgB = (sumB / n).toFloat()
         val avg = (avgR + avgG + avgB) / 3f
 
-        // Gray-world style neutral WB — mild, no blue/yellow push
         var gainR = (avg / max(avgR, 1f)).coerceIn(0.92f, 1.08f)
         var gainG = (avg / max(avgG, 1f)).coerceIn(0.94f, 1.06f)
         var gainB = (avg / max(avgB, 1f)).coerceIn(0.92f, 1.08f)
-        // Soften toward 1 so we don't over-correct
         gainR = lerp(1f, gainR, 0.55f * s)
         gainG = lerp(1f, gainG, 0.55f * s)
         gainB = lerp(1f, gainB, 0.55f * s)
 
         val chromaBoost = 1.05f * s
-
         val out = IntArray(n)
         var sumY1 = 0.0
 
@@ -72,12 +79,10 @@ object DaylightEnhancer {
             var cb = 128f - 0.168736f * r - 0.331264f * g + 0.5f * b
             var cr = 128f + 0.5f * r - 0.418688f * g - 0.081312f * b
 
-            // Open shadows for brighter look
             if (y < 110f) {
                 val t = 1f - (y / 110f)
                 y = (y + 22f * s * t).coerceIn(0f, 255f)
             }
-            // Mild midtone lift
             if (y in 40f..200f) {
                 y = (y + 6f * s).coerceIn(0f, 255f)
             }
@@ -109,7 +114,6 @@ object DaylightEnhancer {
             out[i] = (a shl 24) or (r.toInt() shl 16) or (g.toInt() shl 8) or b.toInt()
         }
 
-        // Noticeably brighter than source
         val meanY1 = (sumY1 / n).toFloat().coerceAtLeast(1f)
         val target = meanY0 * (1f + 0.14f * s)
         val scale = (target / meanY1).coerceIn(1.0f, 1.28f)
@@ -127,6 +131,43 @@ object DaylightEnhancer {
         val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         result.setPixels(out, 0, w, 0, 0, w, h)
         return result
+    }
+
+    /** Structure-preserving luma smooth on flat regions only. */
+    private fun lumaDenoiseSmooth(px: IntArray, w: Int, h: Int, strength: Float) {
+        if (strength < 0.05f) return
+        val copy = px.copyOf()
+        val blend = strength.coerceIn(0f, 0.85f)
+        for (y in 1 until h - 1) {
+            for (x in 1 until w - 1) {
+                val i = y * w + x
+                val l = luma(copy[i])
+                val edge = abs(l - luma(copy[i - 1])) + abs(l - luma(copy[i + 1])) +
+                    abs(l - luma(copy[i - w])) + abs(l - luma(copy[i + w]))
+                if (edge > 22) continue
+
+                var sum = 0
+                for (dy in -1..1) {
+                    for (dx in -1..1) {
+                        sum += luma(copy[(y + dy) * w + (x + dx)])
+                    }
+                }
+                val blur = sum / 9
+                val nl = (l * (1f - blend) + blur * blend).toInt().coerceIn(0, 255)
+                val p = copy[i]
+                val r0 = (p shr 16) and 0xFF
+                val g0 = (p shr 8) and 0xFF
+                val b0 = p and 0xFF
+                val y0 = (r0 * 3 + g0 * 6 + b0) / 10
+                if (y0 <= 0) continue
+                val sc = nl.toFloat() / y0
+                val r = (r0 * sc).toInt().coerceIn(0, 255)
+                val g = (g0 * sc).toInt().coerceIn(0, 255)
+                val b = (b0 * sc).toInt().coerceIn(0, 255)
+                val a = (p ushr 24) and 0xFF
+                px[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
+            }
+        }
     }
 
     private fun edgeAwareClarity(px: IntArray, w: Int, h: Int, amount: Float) {

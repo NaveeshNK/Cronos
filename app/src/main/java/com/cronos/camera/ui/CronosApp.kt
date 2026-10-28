@@ -118,14 +118,20 @@ fun CronosApp() {
                                 val frames = withContext(Dispatchers.IO) {
                                     files.map { decodeAndOrient(it, mirrorHorizontal = useFront) }
                                 }
+                                val selected = withContext(Dispatchers.Default) {
+                                    AdaptiveBurst.selectFrames(frames)
+                                }
                                 val original = withContext(Dispatchers.Default) {
-                                    val selected = AdaptiveBurst.selectFrames(frames)
                                     BurstMerger.merge(selected)
                                 }
                                 // recycle intermediates except if same ref
                                 frames.forEach { if (it != original) runCatching { it.recycle() } }
                                 val enhanced = withContext(Dispatchers.Default) {
-                                    DaylightEnhancer.enhance(original, strength)
+                                    DaylightEnhancer.enhance(
+                                        original,
+                                        strength,
+                                        singleFrame = selected.size <= 1
+                                    )
                                 }
                                 screen = Screen.Review(original, enhanced)
                             } catch (e: Exception) {
