@@ -120,9 +120,49 @@ object DaylightEnhancer {
             }
         }
 
+        // Gentle edge-aware clarity (structure only — skips flat regions)
+        edgeAwareClarity(out, w, h, amount = 0.22f * s)
+
         val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         result.setPixels(out, 0, w, 0, 0, w, h)
         return result
+    }
+
+    /**
+     * Unsharp-style only where local contrast is already present.
+     * Flat walls stay soft-clean; edges gain mild snap without noise boost.
+     */
+    private fun edgeAwareClarity(px: IntArray, w: Int, h: Int, amount: Float) {
+        if (amount < 0.02f) return
+        val copy = px.copyOf()
+        for (y in 1 until h - 1) {
+            for (x in 1 until w - 1) {
+                val i = y * w + x
+                val l = luma(copy[i])
+                val lL = luma(copy[i - 1])
+                val lR = luma(copy[i + 1])
+                val lU = luma(copy[i - w])
+                val lD = luma(copy[i + w])
+                val edge = abs(l - lL) + abs(l - lR) + abs(l - lU) + abs(l - lD)
+                if (edge < 18) continue // flat — skip
+
+                val blur = (lL + lR + lU + lD + l) / 5
+                val detail = l - blur
+                val nl = (l + detail * amount).toInt().coerceIn(0, 255)
+                val p = copy[i]
+                val r0 = (p shr 16) and 0xFF
+                val g0 = (p shr 8) and 0xFF
+                val b0 = p and 0xFF
+                val y0 = (r0 * 3 + g0 * 6 + b0) / 10
+                if (y0 <= 0) continue
+                val scale = nl.toFloat() / y0
+                val r = (r0 * scale).toInt().coerceIn(0, 255)
+                val g = (g0 * scale).toInt().coerceIn(0, 255)
+                val b = (b0 * scale).toInt().coerceIn(0, 255)
+                val a = (p ushr 24) and 0xFF
+                px[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
+            }
+        }
     }
 
     private fun chromaDenoiseSmooth(px: IntArray, w: Int, h: Int) {
