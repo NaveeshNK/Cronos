@@ -7,8 +7,7 @@ import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
- * Pipeline v8 — multi-frame friendly color.
- * Same brightness rule as v7 + stronger selective chroma.
+ * v10 color: brightness-safe chroma boost, milder indoor warmth, stronger daylight pop.
  */
 object DaylightEnhancer {
 
@@ -47,11 +46,11 @@ object DaylightEnhancer {
         var gainG = 1f
         var gainB = 1f
         if (indoor && warmCast) {
-            gainR = 1.012f
-            gainB = 0.992f
+            gainR = 1.01f
+            gainB = 0.995f
         }
 
-        val chromaBoost = if (indoor) 0.82f * s else 0.92f * s
+        val chromaBoost = if (indoor) 0.78f * s else 1.05f * s
 
         val out = IntArray(n)
         var sumY1 = 0.0
@@ -72,7 +71,7 @@ object DaylightEnhancer {
 
             if (indoor && y < 85f) {
                 val t = 1f - (y / 85f)
-                y = (y + 14f * s * t).coerceIn(0f, 255f)
+                y = (y + 12f * s * t).coerceIn(0f, 255f)
             }
 
             val dCb = cb - 128f
@@ -99,8 +98,8 @@ object DaylightEnhancer {
         }
 
         val meanY1 = (sumY1 / n).toFloat().coerceAtLeast(1f)
-        val target = if (indoor) meanY0 * (1f + 0.04f * s) else meanY0
-        val scale = (target / meanY1).coerceIn(0.95f, 1.22f)
+        val target = if (indoor) meanY0 * (1f + 0.03f * s) else meanY0
+        val scale = (target / meanY1).coerceIn(0.95f, 1.20f)
         if (kotlin.math.abs(scale - 1f) > 0.008f) {
             for (i in out.indices) {
                 val p = out[i]
@@ -120,14 +119,12 @@ object DaylightEnhancer {
     private fun hueDependentBoost(hue: Float): Float {
         val deg = Math.toDegrees(hue.toDouble()).toFloat()
         return when {
-            deg > 20f && deg < 90f -> 1.38f
-            deg >= 90f && deg < 150f -> 1.18f
-            deg >= -180f && deg < -120f -> 1.40f
-            deg >= -120f && deg < -40f -> 1.22f
-            deg >= -40f && deg <= 20f -> 1.10f
-            else -> 1.20f
+            deg > 20f && deg < 90f -> 1.35f
+            deg >= 90f && deg < 150f -> 1.16f
+            deg >= -180f && deg < -120f -> 1.38f
+            deg >= -120f && deg < -40f -> 1.20f
+            deg >= -40f && deg <= 20f -> 1.08f
+            else -> 1.18f
         }
     }
-
-    private fun lerp(a: Float, b: Float, t: Float) = a + (b - a) * t
 }

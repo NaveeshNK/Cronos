@@ -249,7 +249,7 @@ private fun CameraBody(
                 .padding(top = 48.dp, start = 20.dp)
         ) {
             Text("CRONOS", color = Color(0xFFE8B86D), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
-            Text("5-frame burst · auto color", color = Color(0xFF90A4AE), style = MaterialTheme.typography.bodySmall)
+            Text("3-frame burst · auto color", color = Color(0xFF90A4AE), style = MaterialTheme.typography.bodySmall)
             if (burstStatus != null) {
                 Text(burstStatus, color = Color(0xFFE8B86D), style = MaterialTheme.typography.bodyMedium)
             }
@@ -277,7 +277,7 @@ private fun CameraBody(
                     .background(if (processing) Color.Gray else Color(0xFFE8B86D))
                     .clickable(enabled = !processing) {
                         val capture = imageCapture ?: return@clickable
-                        val burstCount = 5
+                        val burstCount = 3
                         val files = mutableListOf<File>()
                         fun captureNext(index: Int) {
                             if (index >= burstCount) {

@@ -1,19 +1,18 @@
 package com.cronos.camera.enhance
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Paint
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sqrt
 
 /**
- * Fast multi-frame merge:
- * 1) Estimate small x/y shift vs first frame (downscaled SAD)
- * 2) Align
- * 3) Median combine
+ * v10: 3-frame merge with anti-ghost.
+ * Align small shifts; if a frame shifted too much, drop it (reduces blur trails).
  */
 object BurstMerger {
+
+    private const val MAX_SHIFT_FULL = 24 // px at full res — beyond this, frame is rejected
 
     fun merge(frames: List<Bitmap>): Bitmap {
         require(frames.isNotEmpty())
@@ -21,19 +20,31 @@ object BurstMerger {
 
         val w = frames.minOf { it.width }
         val h = frames.minOf { it.height }
-        val aligned = ArrayList<IntArray>(frames.size)
-        val base = scaleTo(frames[0], w, h)
+        val baseBmp = scaleTo(frames[0], w, h)
         val basePx = IntArray(w * h)
-        base.getPixels(basePx, 0, w, 0, 0, w, h)
+        baseBmp.getPixels(basePx, 0, w, 0, 0, w, h)
+
+        val aligned = ArrayList<IntArray>()
         aligned.add(basePx)
 
         for (i in 1 until frames.size) {
             val bmp = scaleTo(frames[i], w, h)
-            val (dx, dy) = estimateShift(base, bmp)
+            val (dx, dy) = estimateShift(baseBmp, bmp)
+            val dist = sqrt((dx * dx + dy * dy).toDouble())
+            if (dist > MAX_SHIFT_FULL) {
+                // too much motion — skip frame to avoid ghost trails
+                continue
+            }
             aligned.add(shiftPixels(bmp, w, h, dx, dy))
         }
 
         val n = aligned.size
+        if (n == 1) {
+            val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            result.setPixels(basePx, 0, w, 0, 0, w, h)
+            return result
+        }
+
         val out = IntArray(w * h)
         val rs = IntArray(n)
         val gs = IntArray(n)
@@ -50,10 +61,11 @@ object BurstMerger {
                 val m = n / 2
                 out[i] = (0xFF shl 24) or (rs[m] shl 16) or (gs[m] shl 8) or bs[m]
             } else {
+                // 2 frames: average
                 out[i] = (0xFF shl 24) or
-                    (rs.average().toInt().coerceIn(0, 255) shl 16) or
-                    (gs.average().toInt().coerceIn(0, 255) shl 8) or
-                    bs.average().toInt().coerceIn(0, 255)
+                    (((rs[0] + rs[1]) / 2) shl 16) or
+                    (((gs[0] + gs[1]) / 2) shl 8) or
+                    ((bs[0] + bs[1]) / 2)
             }
         }
         val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
@@ -66,7 +78,6 @@ object BurstMerger {
         else Bitmap.createScaledBitmap(src, w, h, true)
     }
 
-    /** Coarse shift search on 1/8 resolution, ±6 px at full res (±48 at full if scale 8 — we search ±8 at small). */
     private fun estimateShift(a: Bitmap, b: Bitmap): Pair<Int, Int> {
         val sw = max(32, a.width / 8)
         val sh = max(32, a.height / 8)
@@ -77,15 +88,13 @@ object BurstMerger {
         sa.getPixels(pa, 0, sw, 0, 0, sw, sh)
         sb.getPixels(pb, 0, sw, 0, 0, sw, sh)
 
-        val maxShift = 6
+        val maxShift = 5
         var best = Long.MAX_VALUE
         var bestDx = 0
         var bestDy = 0
         for (dy in -maxShift..maxShift) {
             for (dx in -maxShift..maxShift) {
                 var sad = 0L
-                var count = 0
-                // sample every 2nd pixel for speed
                 var y = maxShift
                 while (y < sh - maxShift) {
                     var x = maxShift
@@ -97,22 +106,18 @@ object BurstMerger {
                         sad += abs(((ca shr 16) and 0xFF) - ((cb shr 16) and 0xFF))
                         sad += abs(((ca shr 8) and 0xFF) - ((cb shr 8) and 0xFF))
                         sad += abs((ca and 0xFF) - (cb and 0xFF))
-                        count++
                         x += 2
                     }
                     y += 2
                 }
-                if (count > 0 && sad < best) {
+                if (sad < best) {
                     best = sad
                     bestDx = dx
                     bestDy = dy
                 }
             }
         }
-        // map small-res shift → full-res
-        val scaleX = a.width / sw
-        val scaleY = a.height / sh
-        return Pair(bestDx * scaleX, bestDy * scaleY)
+        return Pair(bestDx * (a.width / sw), bestDy * (a.height / sh))
     }
 
     private fun shiftPixels(src: Bitmap, w: Int, h: Int, dx: Int, dy: Int): IntArray {
