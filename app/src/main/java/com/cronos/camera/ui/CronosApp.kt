@@ -11,7 +11,11 @@ import android.provider.MediaStore
 import android.widget.Toast
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
-import androidx.camera.core.ImageCaptureException
+import com.cronos.camera.enhance.HdrBlend
+import com.cronos.camera.enhance.MotionGate
+import androidx.camera.core.ImageCapture
+import com.cronos.camera.enhance.HdrBlend
+import com.cronos.camera.enhance.MotionGateException
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -122,7 +126,30 @@ fun CronosApp() {
                                     AdaptiveBurst.selectFrames(frames)
                                 }
                                 val original = withContext(Dispatchers.Default) {
-                                    BurstMerger.merge(selected)
+                                    when {
+                                        selected.size >= 2 -> {
+                                            // Prefer safe merge; if locked, also try HDR blend of pair
+                                            val merged = BurstMerger.merge(selected)
+                                            // Identify darker frame for highlight recovery
+                                            val mean = selected.map { bmp ->
+                                                val px = IntArray(minOf(4096, bmp.width * bmp.height))
+                                                val sw = minOf(64, bmp.width)
+                                                val sh = minOf(64, bmp.height)
+                                                val small = Bitmap.createScaledBitmap(bmp, sw, sh, true)
+                                                val arr = IntArray(sw * sh)
+                                                small.getPixels(arr, 0, sw, 0, 0, sw, sh)
+                                                arr.map { p -> ((p shr 16) and 0xFF) + ((p shr 8) and 0xFF) + (p and 0xFF) }.average()
+                                            }
+                                            val brightIdx = mean.indices.maxByOrNull { mean[it] } ?: 0
+                                            val darkIdx = mean.indices.minByOrNull { mean[it] } ?: 0
+                                            if (brightIdx != darkIdx && mean[brightIdx] > mean[darkIdx] * 1.05) {
+                                                runCatching {
+                                                    HdrBlend.blend(selected[brightIdx], selected[darkIdx])
+                                                }.getOrDefault(merged)
+                                            } else merged
+                                        }
+                                        else -> BurstMerger.merge(selected)
+                                    }
                                 }
                                 // recycle intermediates except if same ref
                                 frames.forEach { if (it != original) runCatching { it.recycle() } }
@@ -210,6 +237,7 @@ private fun CameraBody(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
+    var boundCamera by remember { mutableStateOf<Camera?>(null) }
     val executor = remember { Executors.newSingleThreadExecutor() }
     DisposableEffect(Unit) { onDispose { executor.shutdown() } }
 
@@ -234,8 +262,10 @@ private fun CameraBody(
                     else CameraSelector.DEFAULT_BACK_CAMERA
                     try {
                         provider.unbindAll()
-                        provider.bindToLifecycle(lifecycleOwner, selector, preview, capture)
-                    } catch (_: Exception) { }
+                        boundCamera = provider.bindToLifecycle(lifecycleOwner, selector, preview, capture)
+                    } catch (_: Exception) {
+                        boundCamera = null
+                    }
                 }, ContextCompat.getMainExecutor(context))
             }
         )
@@ -285,18 +315,47 @@ private fun CameraBody(
                     .background(if (processing) Color.Gray else Color(0xFFE8B86D))
                     .clickable(enabled = !processing) {
                         val capture = imageCapture ?: return@clickable
-                        val burstCount = 2
+                        val camera = boundCamera
                         val files = mutableListOf<File>()
-                        fun captureNext(index: Int) {
-                            if (index >= burstCount) {
+                        val motion = MotionGate(context)
+                        motion.start()
+                        fun finish() {
+                            motion.stop()
+                            // restore exposure
+                            runCatching {
+                                camera?.cameraControl?.setExposureCompensationIndex(0)
+                            }
+                            ContextCompat.getMainExecutor(context).execute {
+                                onBurstProgress(null)
+                                onCapturedFiles(files.toList())
+                            }
+                        }
+                        fun captureAt(index: Int, maxFrames: Int) {
+                            if (index >= maxFrames) {
+                                finish()
+                                return
+                            }
+                            // Early-stop: after first frame, skip rest if hand moved
+                            if (index > 0 && motion.isTooMuchMotion(1.6f)) {
                                 ContextCompat.getMainExecutor(context).execute {
-                                    onBurstProgress(null)
-                                    onCapturedFiles(files.toList())
+                                    onBurstProgress("Hold steady…")
                                 }
+                                finish()
                                 return
                             }
                             ContextCompat.getMainExecutor(context).execute {
-                                onBurstProgress("Capturing ${index + 1}/$burstCount…")
+                                onBurstProgress("Capturing ${index + 1}/$maxFrames…")
+                            }
+                            // Bracket: 2nd frame underexposed for highlight recovery
+                            if (index == 1) {
+                                runCatching {
+                                    val exp = camera?.cameraInfo?.exposureState
+                                    if (exp != null && exp.isExposureCompensationSupported) {
+                                        val range = exp.exposureCompensationRange
+                                        val step = (-1).coerceIn(range.lower, range.upper)
+                                        camera.cameraControl.setExposureCompensationIndex(step)
+                                    }
+                                }
                             }
                             val file = File(context.cacheDir, "cronos_${System.currentTimeMillis()}_$index.jpg")
                             val options = ImageCapture.OutputFileOptions.Builder(file).build()
@@ -306,11 +365,13 @@ private fun CameraBody(
                                 object : ImageCapture.OnImageSavedCallback {
                                     override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
                                         files.add(file)
-                                        captureNext(index + 1)
+                                        captureAt(index + 1, maxFrames)
                                     }
                                     override fun onError(exception: ImageCaptureException) {
+                                        motion.stop()
                                         if (files.isNotEmpty()) {
                                             ContextCompat.getMainExecutor(context).execute {
+                                                onBurstProgress(null)
                                                 onCapturedFiles(files.toList())
                                             }
                                         } else {
@@ -322,7 +383,7 @@ private fun CameraBody(
                                 }
                             )
                         }
-                        captureNext(0)
+                        captureAt(0, 2)
                     },
                 contentAlignment = Alignment.Center
             ) {
