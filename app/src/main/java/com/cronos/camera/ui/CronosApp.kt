@@ -249,7 +249,7 @@ private fun CameraBody(
                 .padding(top = 48.dp, start = 20.dp)
         ) {
             Text("CRONOS", color = Color(0xFFE8B86D), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
-            Text("3-frame · motion-safe · Cronos color", color = Color(0xFF90A4AE), style = MaterialTheme.typography.bodySmall)
+            Text("Fusion v1 · tile confidence", color = Color(0xFF90A4AE), style = MaterialTheme.typography.bodySmall)
             if (burstStatus != null) {
                 Text(burstStatus, color = Color(0xFFE8B86D), style = MaterialTheme.typography.bodyMedium)
             }
