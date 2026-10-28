@@ -22,7 +22,6 @@ object DaylightEnhancer {
         val pixels = IntArray(n)
         input.getPixels(pixels, 0, w, 0, 0, w, h)
 
-        // Optional light chroma denoise on smooth regions (before color boost)
         chromaDenoiseSmooth(pixels, w, h)
 
         var sumY0 = 0.0
@@ -56,7 +55,6 @@ object DaylightEnhancer {
             gainR *= 1.01f
         }
 
-        // Stronger outdoor chroma
         val chromaBoost = if (indoor) 0.78f * s else 1.22f * s
 
         val out = IntArray(n)
@@ -88,9 +86,9 @@ object DaylightEnhancer {
             val dCb = cb - 128f
             val dCr = cr - 128f
             val chroma = sqrt(dCb * dCb + dCr * dCr)
-            val hueBoost = hueBoost(atan2(dCr, dCb))
+            val hb = hueBoost(atan2(dCr, dCb))
             val normC = (chroma / 78f).coerceIn(0f, 1f)
-            val vibrance = 1f + chromaBoost * hueBoost * (1f - normC * 0.40f)
+            val vibrance = 1f + chromaBoost * hb * (1f - normC * 0.40f)
             val protect = when {
                 chroma < 5f -> 0.18f
                 chroma < 12f -> 0.50f
@@ -111,7 +109,7 @@ object DaylightEnhancer {
         val meanY1 = (sumY1 / n).toFloat().coerceAtLeast(1f)
         val target = if (indoor) meanY0 * (1f + 0.025f * s) else meanY0
         val scale = (target / meanY1).coerceIn(0.96f, 1.18f)
-        if (kotlin.math.abs(scale - 1f) > 0.008f) {
+        if (abs(scale - 1f) > 0.008f) {
             for (i in out.indices) {
                 val p = out[i]
                 val a = (p ushr 24) and 0xFF
@@ -127,10 +125,6 @@ object DaylightEnhancer {
         return result
     }
 
-    /**
-     * Light 3x3 chroma average only where luma is smooth (walls/sky),
-     * skips edges so detail stays.
-     */
     private fun chromaDenoiseSmooth(px: IntArray, w: Int, h: Int) {
         val copy = px.copyOf()
         for (y in 1 until h - 1) {
@@ -173,7 +167,13 @@ object DaylightEnhancer {
         }
     }
 
-    
+    private fun luma(p: Int): Int {
+        val r = (p shr 16) and 0xFF
+        val g = (p shr 8) and 0xFF
+        val b = p and 0xFF
+        return (r * 3 + g * 6 + b) / 10
+    }
+
     private fun hueBoost(hue: Float): Float {
         val deg = Math.toDegrees(hue.toDouble()).toFloat()
         return when {
