@@ -7,9 +7,8 @@ import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
- * Cronos Color Engine Q1
- * Research blend: Pixel merge discipline + iPhone warmth/chroma + selective hue pop.
- * Rules: never darken overall; protect near-neutrals; midtone clarity only.
+ * Cronos Color Engine + light smooth-area chroma denoise.
+ * Adaptive outdoor chroma stronger than indoor.
  */
 object DaylightEnhancer {
 
@@ -26,19 +25,19 @@ object DaylightEnhancer {
         val pixels = IntArray(n)
         input.getPixels(pixels, 0, w, 0, 0, w, h)
 
+        // Optional light chroma denoise on smooth regions (before color boost)
+        chromaDenoiseSmooth(pixels, w, h)
+
         var sumY0 = 0.0
         var sumR = 0.0
         var sumG = 0.0
         var sumB = 0.0
-        val hist = IntArray(256)
         for (p in pixels) {
             val r = (p shr 16) and 0xFF
             val g = (p shr 8) and 0xFF
             val b = p and 0xFF
-            val y = (r * 3 + g * 6 + b) / 10
             sumY0 += 0.299 * r + 0.587 * g + 0.114 * b
             sumR += r; sumG += g; sumB += b
-            hist[y.coerceIn(0, 255)]++
         }
         val meanY0 = (sumY0 / n).toFloat()
         val avgR = (sumR / n).toFloat()
@@ -46,22 +45,6 @@ object DaylightEnhancer {
         val avgB = (sumB / n).toFloat()
         val warmCast = avgR > avgB + 6f
         val indoor = meanY0 < 138f || warmCast
-
-        // Soft black/white points for gentle DR without crushing
-        fun pct(p: Float): Int {
-            val t = (n * p).toInt().coerceIn(0, n - 1)
-            var acc = 0
-            for (i in 0..255) {
-                acc += hist[i]
-                if (acc >= t) return i
-            }
-            return 255
-        }
-        val p2 = pct(0.02f)
-        val p98 = pct(0.98f)
-        val black = if (indoor) p2 * 0.25f else p2 * 0.15f
-        val white = 255f - (255 - p98) * 0.15f
-        val range = (white - black).coerceAtLeast(120f)
 
         var gainR = 1f
         var gainG = 1f
@@ -71,14 +54,13 @@ object DaylightEnhancer {
             gainB = 0.994f
         } else if (!indoor) {
             val avg = (avgR + avgG + avgB) / 3f
-            gainR = lerp(1f, (avg / max(avgR, 1f)).coerceIn(0.97f, 1.03f), 0.35f * s)
-            gainG = lerp(1f, (avg / max(avgG, 1f)).coerceIn(0.97f, 1.03f), 0.35f * s)
-            gainB = lerp(1f, (avg / max(avgB, 1f)).coerceIn(0.97f, 1.03f), 0.35f * s)
-            gainR *= 1.008f
+            gainR = lerp(1f, (avg / max(avgR, 1f)).coerceIn(0.97f, 1.03f), 0.3f * s)
+            gainB = lerp(1f, (avg / max(avgB, 1f)).coerceIn(0.97f, 1.03f), 0.3f * s)
+            gainR *= 1.01f
         }
 
-        val chromaBoost = if (indoor) 0.80f * s else 1.08f * s
-        val midClarity = if (indoor) 0.10f * s else 0.14f * s
+        // Stronger outdoor chroma
+        val chromaBoost = if (indoor) 0.78f * s else 1.22f * s
 
         val out = IntArray(n)
         var sumY1 = 0.0
@@ -86,40 +68,24 @@ object DaylightEnhancer {
         for (i in pixels.indices) {
             val p = pixels[i]
             val a = (p ushr 24) and 0xFF
-            var r = ((p shr 16) and 0xFF).toFloat()
-            var g = ((p shr 8) and 0xFF).toFloat()
-            var b = (p and 0xFF).toFloat()
-
-            // Gentle levels
-            r = ((r - black) / range * 255f).coerceIn(0f, 255f)
-            g = ((g - black) / range * 255f).coerceIn(0f, 255f)
-            b = ((b - black) / range * 255f).coerceIn(0f, 255f)
-
-            r = (r * gainR).coerceIn(0f, 255f)
-            g = (g * gainG).coerceIn(0f, 255f)
-            b = (b * gainB).coerceIn(0f, 255f)
+            var r = ((p shr 16) and 0xFF) * gainR
+            var g = ((p shr 8) and 0xFF) * gainG
+            var b = (p and 0xFF) * gainB
+            r = r.coerceIn(0f, 255f)
+            g = g.coerceIn(0f, 255f)
+            b = b.coerceIn(0f, 255f)
 
             var y = 0.299f * r + 0.587f * g + 0.114f * b
             var cb = 128f - 0.168736f * r - 0.331264f * g + 0.5f * b
             var cr = 128f + 0.5f * r - 0.418688f * g - 0.081312f * b
 
-            // Shadow lift only (never crush)
             if (indoor && y < 88f) {
                 val t = 1f - (y / 88f)
                 y = (y + 11f * s * t).coerceIn(0f, 255f)
             }
-            // Highlight soft roll
             if (y > 220f) {
                 val t = (y - 220f) / 35f
-                y = 220f + 35f * (t / (1f + 0.35f * s * t))
-            }
-
-            // Midtone clarity on luma (S-curve only above deep shadows)
-            if (y > 40f && midClarity > 0.02f) {
-                val yn = (y / 255f).coerceIn(0f, 1f)
-                val shaped = 0.5f + (yn - 0.5f) * (1f + midClarity)
-                val mix = ((y - 40f) / 40f).coerceIn(0f, 1f)
-                y = lerp(y, shaped.coerceIn(0f, 1f) * 255f, mix * 0.7f)
+                y = 220f + 35f * (t / (1f + 0.3f * s * t))
             }
 
             val dCb = cb - 128f
@@ -127,7 +93,7 @@ object DaylightEnhancer {
             val chroma = sqrt(dCb * dCb + dCr * dCr)
             val hueBoost = hueBoost(atan2(dCr, dCb))
             val normC = (chroma / 78f).coerceIn(0f, 1f)
-            val vibrance = 1f + chromaBoost * hueBoost * (1f - normC * 0.42f)
+            val vibrance = 1f + chromaBoost * hueBoost * (1f - normC * 0.40f)
             val protect = when {
                 chroma < 5f -> 0.18f
                 chroma < 12f -> 0.50f
@@ -145,7 +111,6 @@ object DaylightEnhancer {
             out[i] = (a shl 24) or (r.toInt() shl 16) or (g.toInt() shl 8) or b.toInt()
         }
 
-        // Preserve mean brightness
         val meanY1 = (sumY1 / n).toFloat().coerceAtLeast(1f)
         val target = if (indoor) meanY0 * (1f + 0.025f * s) else meanY0
         val scale = (target / meanY1).coerceIn(0.96f, 1.18f)
@@ -165,14 +130,75 @@ object DaylightEnhancer {
         return result
     }
 
+    /**
+     * Light 3x3 chroma average only where luma is smooth (walls/sky),
+     * skips edges so detail stays.
+     */
+    private fun chromaDenoiseSmooth(px: IntArray, w: Int, h: Int) {
+        val copy = px.copyOf()
+        val step = 1
+        for (y in 1 until h - 1 step step) {
+            for (x in 1 until w - 1 step step) {
+                val i = y * w + x
+                val l = luma(copy[i])
+                val lx = abs(l - luma(copy[i - 1])) + abs(l - luma(copy[i + 1]))
+                val ly = abs(l - luma(copy[i - w])) + abs(l - luma(copy[i + w]))
+                if (lx + ly > 28) continue // edge / texture — skip
+
+                var cbSum = 0f
+                var crSum = 0f
+                var ySum = 0f
+                for (dy in -1..1) {
+                    for (dx in -1..1) {
+                        val p = copy[(y + dy) * w + (x + dx)]
+                        val r = ((p shr 16) and 0xFF).toFloat()
+                        val g = ((p shr 8) and 0xFF).toFloat()
+                        val b = (p and 0xFF).toFloat()
+                        val yy = 0.299f * r + 0.587f * g + 0.114f * b
+                        val cb = 128f - 0.168736f * r - 0.331264f * g + 0.5f * b
+                        val cr = 128f + 0.5f * r - 0.418688f * g - 0.081312f * b
+                        ySum += yy
+                        cbSum += cb
+                        crSum += cr
+                    }
+                }
+                val yy = ySum / 9f
+                val cb = cbSum / 9f
+                val cr = crSum / 9f
+                // blend 60% smoothed chroma with original luma structure
+                val p0 = copy[i]
+                val r0 = ((p0 shr 16) and 0xFF).toFloat()
+                val g0 = ((p0 shr 8) and 0xFF).toFloat()
+                val b0 = (p0 and 0xFF).toFloat()
+                val y0 = 0.299f * r0 + 0.587f * g0 + 0.114f * b0
+                val cb0 = 128f - 0.168736f * r0 - 0.331264f * g0 + 0.5f * b0
+                val cr0 = 128f + 0.5f * r0 - 0.418688f * g0 - 0.081312f * b0
+                val cbM = cb0 * 0.4f + cb * 0.6f
+                val crM = cr0 * 0.4f + cr * 0.6f
+                val r = (y0 + 1.402f * (crM - 128f)).coerceIn(0f, 255f)
+                val g = (y0 - 0.344136f * (cbM - 128f) - 0.714136f * (crM - 128f)).coerceIn(0f, 255f)
+                val b = (y0 + 1.772f * (cbM - 128f)).coerceIn(0f, 255f)
+                val a = (p0 ushr 24) and 0xFF
+                px[i] = (a shl 24) or (r.toInt() shl 16) or (g.toInt() shl 8) or b.toInt()
+            }
+        }
+    }
+
+    private fun luma(p: Int): Int {
+        val r = (p shr 16) and 0xFF
+        val g = (p shr 8) and 0xFF
+        val b = p and 0xFF
+        return (r * 3 + g * 6 + b) / 10
+    }
+
     private fun hueBoost(hue: Float): Float {
         val deg = Math.toDegrees(hue.toDouble()).toFloat()
         return when {
-            deg > 20f && deg < 90f -> 1.36f   // reds / wood
+            deg > 20f && deg < 90f -> 1.36f
             deg >= 90f && deg < 150f -> 1.15f
-            deg >= -180f && deg < -120f -> 1.40f // blues
-            deg >= -120f && deg < -40f -> 1.22f  // cyan/sky
-            deg >= -40f && deg <= 20f -> 1.10f   // greens/yellow
+            deg >= -180f && deg < -120f -> 1.42f
+            deg >= -120f && deg < -40f -> 1.25f
+            deg >= -40f && deg <= 20f -> 1.12f
             else -> 1.18f
         }
     }

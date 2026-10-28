@@ -65,6 +65,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.cronos.camera.enhance.AdaptiveBurst
 import com.cronos.camera.enhance.BurstMerger
 import com.cronos.camera.enhance.DaylightEnhancer
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
@@ -115,10 +116,11 @@ fun CronosApp() {
                         scope.launch {
                             try {
                                 val frames = withContext(Dispatchers.IO) {
-                                    files.map { decodeAndOrient(it) }
+                                    files.map { decodeAndOrient(it, mirrorHorizontal = useFront) }
                                 }
                                 val original = withContext(Dispatchers.Default) {
-                                    BurstMerger.merge(frames)
+                                    val selected = AdaptiveBurst.selectFrames(frames)
+                                    BurstMerger.merge(selected)
                                 }
                                 // recycle intermediates except if same ref
                                 frames.forEach { if (it != original) runCatching { it.recycle() } }
@@ -249,7 +251,7 @@ private fun CameraBody(
                 .padding(top = 48.dp, start = 20.dp)
         ) {
             Text("CRONOS", color = Color(0xFFE8B86D), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
-            Text("Fusion v1 · tile confidence", color = Color(0xFF90A4AE), style = MaterialTheme.typography.bodySmall)
+            Text("Adaptive fusion · smooth denoise", color = Color(0xFF90A4AE), style = MaterialTheme.typography.bodySmall)
             if (burstStatus != null) {
                 Text(burstStatus, color = Color(0xFFE8B86D), style = MaterialTheme.typography.bodyMedium)
             }
@@ -393,7 +395,7 @@ private fun ReviewBody(
     }
 }
 
-private fun decodeAndOrient(file: File): Bitmap {
+private fun decodeAndOrient(file: File, mirrorHorizontal: Boolean = false): Bitmap {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeFile(file.absolutePath, bounds)
     val maxSide = 2048
@@ -404,7 +406,7 @@ private fun decodeAndOrient(file: File): Bitmap {
         inSampleSize = sample
         inPreferredConfig = Bitmap.Config.ARGB_8888
     }
-    val bmp = BitmapFactory.decodeFile(file.absolutePath, opts) ?: error("Could not decode image")
+    var bmp = BitmapFactory.decodeFile(file.absolutePath, opts) ?: error("Could not decode image")
     val exif = ExifInterface(file.absolutePath)
     val orient = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
     val degrees = when (orient) {
@@ -413,11 +415,21 @@ private fun decodeAndOrient(file: File): Bitmap {
         ExifInterface.ORIENTATION_ROTATE_270 -> 270f
         else -> 0f
     }
-    if (degrees == 0f) return bmp
-    val m = Matrix().apply { postRotate(degrees) }
-    return Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true).also {
-        if (it != bmp) bmp.recycle()
+    if (degrees != 0f) {
+        val m = Matrix().apply { postRotate(degrees) }
+        val rotated = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+        if (rotated != bmp) bmp.recycle()
+        bmp = rotated
     }
+    if (mirrorHorizontal) {
+        val m = Matrix().apply {
+            postScale(-1f, 1f, bmp.width / 2f, bmp.height / 2f)
+        }
+        val flipped = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+        if (flipped != bmp) bmp.recycle()
+        bmp = flipped
+    }
+    return bmp
 }
 
 private fun saveToGallery(context: Context, bitmap: Bitmap): Boolean {
