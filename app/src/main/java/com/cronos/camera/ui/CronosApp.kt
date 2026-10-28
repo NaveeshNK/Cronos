@@ -90,7 +90,7 @@ fun CronosApp() {
     val context = LocalContext.current
     val cameraPermission = rememberPermissionState(Manifest.permission.CAMERA)
     var screen by remember { mutableStateOf<Screen>(Screen.Camera) }
-    val strength = 0.80f
+    val strength = 0.82f
     var processing by remember { mutableStateOf(false) }
     var burstStatus by remember { mutableStateOf<String?>(null) }
     var useFront by remember { mutableStateOf(false) }
@@ -249,7 +249,7 @@ private fun CameraBody(
                 .padding(top = 48.dp, start = 20.dp)
         ) {
             Text("CRONOS", color = Color(0xFFE8B86D), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
-            Text("3-frame burst · auto color", color = Color(0xFF90A4AE), style = MaterialTheme.typography.bodySmall)
+            Text("3-frame · motion-safe · Cronos color", color = Color(0xFF90A4AE), style = MaterialTheme.typography.bodySmall)
             if (burstStatus != null) {
                 Text(burstStatus, color = Color(0xFFE8B86D), style = MaterialTheme.typography.bodyMedium)
             }

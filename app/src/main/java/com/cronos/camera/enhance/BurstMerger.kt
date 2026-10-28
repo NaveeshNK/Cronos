@@ -7,12 +7,17 @@ import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
- * v10: 3-frame merge with anti-ghost.
- * Align small shifts; if a frame shifted too much, drop it (reduces blur trails).
+ * Motion-safe merge (v11):
+ * - Score sharpness per frame (Laplacian-ish energy)
+ * - Estimate shift vs sharpest reference
+ * - If ANY frame shifts beyond tiny threshold → return sharpest frame ONLY
+ *   (no median of misaligned frames = no soft ghost blur)
+ * - Only merge when all frames are nearly locked
  */
 object BurstMerger {
 
-    private const val MAX_SHIFT_FULL = 24 // px at full res — beyond this, frame is rejected
+    // Very strict: small hand shake often exceeds this → prefer sharp single frame
+    private const val MAX_SHIFT_FULL = 6
 
     fun merge(frames: List<Bitmap>): Bitmap {
         require(frames.isNotEmpty())
@@ -20,29 +25,39 @@ object BurstMerger {
 
         val w = frames.minOf { it.width }
         val h = frames.minOf { it.height }
-        val baseBmp = scaleTo(frames[0], w, h)
-        val basePx = IntArray(w * h)
-        baseBmp.getPixels(basePx, 0, w, 0, 0, w, h)
+        val scaled = frames.map { scaleTo(it, w, h) }
+
+        // Pick sharpest as reference (not always frame 0)
+        var bestIdx = 0
+        var bestSharp = -1.0
+        for (i in scaled.indices) {
+            val s = sharpnessScore(scaled[i])
+            if (s > bestSharp) {
+                bestSharp = s
+                bestIdx = i
+            }
+        }
+        val ref = scaled[bestIdx]
+        val refPx = IntArray(w * h)
+        ref.getPixels(refPx, 0, w, 0, 0, w, h)
 
         val aligned = ArrayList<IntArray>()
-        aligned.add(basePx)
+        aligned.add(refPx)
 
-        for (i in 1 until frames.size) {
-            val bmp = scaleTo(frames[i], w, h)
-            val (dx, dy) = estimateShift(baseBmp, bmp)
+        for (i in scaled.indices) {
+            if (i == bestIdx) continue
+            val (dx, dy) = estimateShift(ref, scaled[i])
             val dist = sqrt((dx * dx + dy * dy).toDouble())
             if (dist > MAX_SHIFT_FULL) {
-                // too much motion — skip frame to avoid ghost trails
-                continue
+                // Motion detected — abort merge, return sharpest only
+                return ref.copy(Bitmap.Config.ARGB_8888, false)
             }
-            aligned.add(shiftPixels(bmp, w, h, dx, dy))
+            aligned.add(shiftPixels(scaled[i], w, h, dx, dy))
         }
 
         val n = aligned.size
-        if (n == 1) {
-            val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-            result.setPixels(basePx, 0, w, 0, 0, w, h)
-            return result
+        if (n < 2) {
+            return ref.copy(Bitmap.Config.ARGB_8888, false)
         }
 
         val out = IntArray(w * h)
@@ -61,7 +76,6 @@ object BurstMerger {
                 val m = n / 2
                 out[i] = (0xFF shl 24) or (rs[m] shl 16) or (gs[m] shl 8) or bs[m]
             } else {
-                // 2 frames: average
                 out[i] = (0xFF shl 24) or
                     (((rs[0] + rs[1]) / 2) shl 16) or
                     (((gs[0] + gs[1]) / 2) shl 8) or
@@ -71,6 +85,36 @@ object BurstMerger {
         val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         result.setPixels(out, 0, w, 0, 0, w, h)
         return result
+    }
+
+    /** Higher = sharper (sum of absolute horizontal+vertical gradients on luma, subsampled). */
+    private fun sharpnessScore(bmp: Bitmap): Double {
+        val w = bmp.width
+        val h = bmp.height
+        val px = IntArray(w * h)
+        bmp.getPixels(px, 0, w, 0, 0, w, h)
+        var sum = 0.0
+        var y = 1
+        while (y < h - 1) {
+            var x = 1
+            while (x < w - 1) {
+                val i = y * w + x
+                val l = luma(px[i])
+                val lx = luma(px[i + 1])
+                val ly = luma(px[i + w])
+                sum += abs(l - lx) + abs(l - ly)
+                x += 3
+            }
+            y += 3
+        }
+        return sum
+    }
+
+    private fun luma(p: Int): Int {
+        val r = (p shr 16) and 0xFF
+        val g = (p shr 8) and 0xFF
+        val b = p and 0xFF
+        return (r * 3 + g * 6 + b) / 10
     }
 
     private fun scaleTo(src: Bitmap, w: Int, h: Int): Bitmap {
@@ -88,7 +132,7 @@ object BurstMerger {
         sa.getPixels(pa, 0, sw, 0, 0, sw, sh)
         sb.getPixels(pb, 0, sw, 0, 0, sw, sh)
 
-        val maxShift = 5
+        val maxShift = 4
         var best = Long.MAX_VALUE
         var bestDx = 0
         var bestDy = 0
