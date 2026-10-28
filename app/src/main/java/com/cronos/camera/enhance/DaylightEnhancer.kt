@@ -7,9 +7,12 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
 
+/**
+ * v14 — cooler neutral base, brighter, more chroma; kill yellow indoor cast.
+ */
 object DaylightEnhancer {
 
-    fun enhance(source: Bitmap, strength: Float = 0.82f): Bitmap {
+    fun enhance(source: Bitmap, strength: Float = 0.85f): Bitmap {
         val s = strength.coerceIn(0f, 1f)
         if (s <= 0.01f) return source.copy(Bitmap.Config.ARGB_8888, false)
 
@@ -39,23 +42,29 @@ object DaylightEnhancer {
         val avgR = (sumR / n).toFloat()
         val avgG = (sumG / n).toFloat()
         val avgB = (sumB / n).toFloat()
-        val warmCast = avgR > avgB + 6f
-        val indoor = meanY0 < 138f || warmCast
+        val indoor = meanY0 < 140f
 
+        // Anti-yellow: pull red/green down slightly, lift blue when warm cast present
         var gainR = 1f
         var gainG = 1f
         var gainB = 1f
-        if (indoor && warmCast) {
-            gainR = 1.012f
-            gainB = 0.994f
+        if (avgR > avgB + 4f) {
+            // Neutralize yellow/warm cast
+            gainR = 0.96f
+            gainG = 0.98f
+            gainB = 1.06f
+        } else if (avgR > avgB) {
+            gainR = 0.98f
+            gainB = 1.03f
         } else if (!indoor) {
             val avg = (avgR + avgG + avgB) / 3f
-            gainR = lerp(1f, (avg / max(avgR, 1f)).coerceIn(0.97f, 1.03f), 0.3f * s)
-            gainB = lerp(1f, (avg / max(avgB, 1f)).coerceIn(0.97f, 1.03f), 0.3f * s)
-            gainR *= 1.01f
+            gainR = (avg / max(avgR, 1f)).coerceIn(0.97f, 1.03f)
+            gainG = (avg / max(avgG, 1f)).coerceIn(0.97f, 1.03f)
+            gainB = (avg / max(avgB, 1f)).coerceIn(0.97f, 1.03f)
         }
 
-        val chromaBoost = if (indoor) 0.78f * s else 1.22f * s
+        // Stronger color for both scenes
+        val chromaBoost = if (indoor) 0.95f * s else 1.28f * s
 
         val out = IntArray(n)
         var sumY1 = 0.0
@@ -74,13 +83,14 @@ object DaylightEnhancer {
             var cb = 128f - 0.168736f * r - 0.331264f * g + 0.5f * b
             var cr = 128f + 0.5f * r - 0.418688f * g - 0.081312f * b
 
-            if (indoor && y < 88f) {
-                val t = 1f - (y / 88f)
-                y = (y + 11f * s * t).coerceIn(0f, 255f)
+            // Brighter shadows + mild overall lift target later
+            if (y < 100f) {
+                val t = 1f - (y / 100f)
+                y = (y + 16f * s * t).coerceIn(0f, 255f)
             }
-            if (y > 220f) {
-                val t = (y - 220f) / 35f
-                y = 220f + 35f * (t / (1f + 0.3f * s * t))
+            if (y > 225f) {
+                val t = (y - 225f) / 30f
+                y = 225f + 30f * (t / (1f + 0.25f * s * t))
             }
 
             val dCb = cb - 128f
@@ -88,15 +98,20 @@ object DaylightEnhancer {
             val chroma = sqrt(dCb * dCb + dCr * dCr)
             val hb = hueBoost(atan2(dCr, dCb))
             val normC = (chroma / 78f).coerceIn(0f, 1f)
-            val vibrance = 1f + chromaBoost * hb * (1f - normC * 0.40f)
+            val vibrance = 1f + chromaBoost * hb * (1f - normC * 0.38f)
             val protect = when {
-                chroma < 5f -> 0.18f
-                chroma < 12f -> 0.50f
+                chroma < 5f -> 0.22f  // neutrals stay neutral (less yellow push)
+                chroma < 12f -> 0.55f
                 else -> 1f
             }
             val factor = 1f + (vibrance - 1f) * protect
             cb = 128f + dCb * factor
             cr = 128f + dCr * factor
+
+            // Extra anti-yellow: slightly compress red-yellow chroma when warm
+            if (dCr > 4f && dCb < 0f) {
+                cr = 128f + (cr - 128f) * (1f - 0.12f * s)
+            }
 
             r = (y + 1.402f * (cr - 128f)).coerceIn(0f, 255f)
             g = (y - 0.344136f * (cb - 128f) - 0.714136f * (cr - 128f)).coerceIn(0f, 255f)
@@ -106,10 +121,11 @@ object DaylightEnhancer {
             out[i] = (a shl 24) or (r.toInt() shl 16) or (g.toInt() shl 8) or b.toInt()
         }
 
+        // Brighter target than source mean
         val meanY1 = (sumY1 / n).toFloat().coerceAtLeast(1f)
-        val target = if (indoor) meanY0 * (1f + 0.025f * s) else meanY0
-        val scale = (target / meanY1).coerceIn(0.96f, 1.18f)
-        if (abs(scale - 1f) > 0.008f) {
+        val target = meanY0 * (1f + 0.08f * s)  // brighter overall
+        val scale = (target / meanY1).coerceIn(0.98f, 1.22f)
+        if (abs(scale - 1f) > 0.006f) {
             for (i in out.indices) {
                 val p = out[i]
                 val a = (p ushr 24) and 0xFF
@@ -120,18 +136,13 @@ object DaylightEnhancer {
             }
         }
 
-        // Gentle edge-aware clarity (structure only — skips flat regions)
-        edgeAwareClarity(out, w, h, amount = 0.22f * s)
+        edgeAwareClarity(out, w, h, amount = 0.20f * s)
 
         val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         result.setPixels(out, 0, w, 0, 0, w, h)
         return result
     }
 
-    /**
-     * Unsharp-style only where local contrast is already present.
-     * Flat walls stay soft-clean; edges gain mild snap without noise boost.
-     */
     private fun edgeAwareClarity(px: IntArray, w: Int, h: Int, amount: Float) {
         if (amount < 0.02f) return
         val copy = px.copyOf()
@@ -144,8 +155,7 @@ object DaylightEnhancer {
                 val lU = luma(copy[i - w])
                 val lD = luma(copy[i + w])
                 val edge = abs(l - lL) + abs(l - lR) + abs(l - lU) + abs(l - lD)
-                if (edge < 18) continue // flat — skip
-
+                if (edge < 18) continue
                 val blur = (lL + lR + lU + lD + l) / 5
                 val detail = l - blur
                 val nl = (l + detail * amount).toInt().coerceIn(0, 255)
@@ -155,10 +165,10 @@ object DaylightEnhancer {
                 val b0 = p and 0xFF
                 val y0 = (r0 * 3 + g0 * 6 + b0) / 10
                 if (y0 <= 0) continue
-                val scale = nl.toFloat() / y0
-                val r = (r0 * scale).toInt().coerceIn(0, 255)
-                val g = (g0 * scale).toInt().coerceIn(0, 255)
-                val b = (b0 * scale).toInt().coerceIn(0, 255)
+                val sc = nl.toFloat() / y0
+                val r = (r0 * sc).toInt().coerceIn(0, 255)
+                val g = (g0 * sc).toInt().coerceIn(0, 255)
+                val b = (b0 * sc).toInt().coerceIn(0, 255)
                 val a = (p ushr 24) and 0xFF
                 px[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
             }
@@ -174,7 +184,6 @@ object DaylightEnhancer {
                 val edge = abs(l - luma(copy[i - 1])) + abs(l - luma(copy[i + 1])) +
                     abs(l - luma(copy[i - w])) + abs(l - luma(copy[i + w]))
                 if (edge > 28) continue
-
                 var cbSum = 0f
                 var crSum = 0f
                 for (dy in -1..1) {
@@ -217,12 +226,12 @@ object DaylightEnhancer {
     private fun hueBoost(hue: Float): Float {
         val deg = Math.toDegrees(hue.toDouble()).toFloat()
         return when {
-            deg > 20f && deg < 90f -> 1.36f
-            deg >= 90f && deg < 150f -> 1.15f
-            deg >= -180f && deg < -120f -> 1.42f
-            deg >= -120f && deg < -40f -> 1.25f
-            deg >= -40f && deg <= 20f -> 1.12f
-            else -> 1.18f
+            deg > 20f && deg < 90f -> 1.28f   // reds — less aggressive (was yellowing wood)
+            deg >= 90f && deg < 150f -> 1.12f
+            deg >= -180f && deg < -120f -> 1.48f // blues stronger
+            deg >= -120f && deg < -40f -> 1.30f
+            deg >= -40f && deg <= 20f -> 1.18f  // greens
+            else -> 1.15f
         }
     }
 
