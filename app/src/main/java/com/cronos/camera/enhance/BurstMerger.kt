@@ -7,17 +7,13 @@ import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
- * Cronos Fusion v1 — confidence-guided tile merge (HDR+-inspired, RGB path).
- *
- * 1) Pick sharpest frame as reference
- * 2) Global coarse align other frames to reference
- * 3) Per-tile: if alternate frames agree with reference → weighted merge
- *    else → keep reference only (no ghost / soft blur)
+ * Safe fusion: merge only when frames are nearly identical.
+ * Any real motion → sharpest single frame (no ghost / overlay / cracks).
  */
 object BurstMerger {
 
-    private const val TILE = 32
-    private const val MAX_GLOBAL_SHIFT = 12
+    private const val MAX_SHIFT = 3          // px full-res — very strict
+    private const val MAX_MEAN_DIFF = 8.0    // luma mean abs diff at small scale
 
     fun merge(frames: List<Bitmap>): Bitmap {
         require(frames.isNotEmpty())
@@ -27,7 +23,6 @@ object BurstMerger {
         val h = frames.minOf { it.height }
         val scaled = frames.map { scaleTo(it, w, h) }
 
-        // --- 1) Sharpest reference ---
         var refIdx = 0
         var bestSharp = -1.0
         for (i in scaled.indices) {
@@ -41,112 +36,69 @@ object BurstMerger {
         val ref = IntArray(w * h)
         refBmp.getPixels(ref, 0, w, 0, 0, w, h)
 
-        // --- 2) Align others to reference (global translation) ---
-        val others = ArrayList<IntArray>()
+        val aligned = ArrayList<IntArray>()
+        aligned.add(ref)
+
         for (i in scaled.indices) {
             if (i == refIdx) continue
             val (dx, dy) = estimateShift(refBmp, scaled[i])
             val dist = sqrt((dx * dx + dy * dy).toDouble())
-            if (dist > MAX_GLOBAL_SHIFT) {
-                // Whole frame too far — skip this alternate entirely
-                continue
+            if (dist > MAX_SHIFT) {
+                // Motion — abort entire merge
+                return refBmp.copy(Bitmap.Config.ARGB_8888, false)
             }
-            others.add(shiftPixels(scaled[i], w, h, dx, dy))
+            val meanDiff = meanLumaDiff(refBmp, scaled[i], dx, dy)
+            if (meanDiff > MAX_MEAN_DIFF) {
+                return refBmp.copy(Bitmap.Config.ARGB_8888, false)
+            }
+            aligned.add(shiftPixels(scaled[i], w, h, dx, dy))
         }
 
-        if (others.isEmpty()) {
+        if (aligned.size < 2) {
             return refBmp.copy(Bitmap.Config.ARGB_8888, false)
         }
 
-        // --- 3) Tile confidence merge ---
-        val out = ref.copyOf()
-        val tilesX = (w + TILE - 1) / TILE
-        val tilesY = (h + TILE - 1) / TILE
-
-        for (ty in 0 until tilesY) {
-            for (tx in 0 until tilesX) {
-                val x0 = tx * TILE
-                val y0 = ty * TILE
-                val x1 = min(w, x0 + TILE)
-                val y1 = min(h, y0 + TILE)
-
-                // Noise-aware threshold from reference tile variance (dark noisier)
-                var meanL = 0.0
-                var count = 0
-                for (y in y0 until y1) {
-                    for (x in x0 until x1) {
-                        meanL += luma(ref[y * w + x])
-                        count++
-                    }
-                }
-                meanL /= max(1, count)
-                // Higher threshold in dark tiles (sensor noise)
-                val baseThresh = 12.0 + (40.0 - meanL.coerceIn(0.0, 40.0)) * 0.35
-
-                // Which alternates are consistent for this tile?
-                val good = ArrayList<IntArray>()
-                for (alt in others) {
-                    var sad = 0.0
-                    var n = 0
-                    var y = y0
-                    while (y < y1) {
-                        var x = x0
-                        while (x < x1) {
-                            val i = y * w + x
-                            sad += abs(luma(ref[i]) - luma(alt[i]))
-                            n++
-                            x += 2
-                        }
-                        y += 2
-                    }
-                    val avgSad = sad / max(1, n)
-                    if (avgSad <= baseThresh) {
-                        good.add(alt)
-                    }
-                }
-
-                if (good.isEmpty()) {
-                    // keep reference pixels already in out
-                    continue
-                }
-
-                // Merge: reference + consistent alternates (median if 2+ alts, else average)
-                for (y in y0 until y1) {
-                    for (x in x0 until x1) {
-                        val i = y * w + x
-                        val n = 1 + good.size
-                        if (n == 2) {
-                            val p0 = ref[i]
-                            val p1 = good[0][i]
-                            val r = (((p0 shr 16) and 0xFF) + ((p1 shr 16) and 0xFF)) / 2
-                            val g = (((p0 shr 8) and 0xFF) + ((p1 shr 8) and 0xFF)) / 2
-                            val b = ((p0 and 0xFF) + (p1 and 0xFF)) / 2
-                            out[i] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
-                        } else {
-                            val rs = IntArray(n)
-                            val gs = IntArray(n)
-                            val bs = IntArray(n)
-                            rs[0] = (ref[i] shr 16) and 0xFF
-                            gs[0] = (ref[i] shr 8) and 0xFF
-                            bs[0] = ref[i] and 0xFF
-                            for (k in good.indices) {
-                                val p = good[k][i]
-                                rs[k + 1] = (p shr 16) and 0xFF
-                                gs[k + 1] = (p shr 8) and 0xFF
-                                bs[k + 1] = p and 0xFF
-                            }
-                            rs.sort(); gs.sort(); bs.sort()
-                            val m = n / 2
-                            out[i] = (0xFF shl 24) or (rs[m] shl 16) or (gs[m] shl 8) or bs[m]
-                        }
-                    }
-                }
+        // Simple average only (no tile seams) — safe when locked
+        val n = aligned.size
+        val out = IntArray(w * h)
+        for (i in out.indices) {
+            var r = 0; var g = 0; var b = 0
+            for (f in 0 until n) {
+                val p = aligned[f][i]
+                r += (p shr 16) and 0xFF
+                g += (p shr 8) and 0xFF
+                b += p and 0xFF
             }
+            out[i] = (0xFF shl 24) or ((r / n) shl 16) or ((g / n) shl 8) or (b / n)
         }
-
         val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         result.setPixels(out, 0, w, 0, 0, w, h)
         return result
+    }
+
+    private fun meanLumaDiff(a: Bitmap, b: Bitmap, dx: Int, dy: Int): Double {
+        val sw = max(32, a.width / 8)
+        val sh = max(32, a.height / 8)
+        val sa = Bitmap.createScaledBitmap(a, sw, sh, true)
+        val sb = Bitmap.createScaledBitmap(b, sw, sh, true)
+        val pa = IntArray(sw * sh)
+        val pb = IntArray(sw * sh)
+        sa.getPixels(pa, 0, sw, 0, 0, sw, sh)
+        sb.getPixels(pb, 0, sw, 0, 0, sw, sh)
+        val sdx = dx / (a.width / sw).coerceAtLeast(1)
+        val sdy = dy / (a.height / sh).coerceAtLeast(1)
+        var sum = 0.0
+        var n = 0
+        for (y in 2 until sh - 2) {
+            for (x in 2 until sw - 2) {
+                val ia = y * sw + x
+                val xb = (x + sdx).coerceIn(0, sw - 1)
+                val yb = (y + sdy).coerceIn(0, sh - 1)
+                sum += abs(luma(pa[ia]) - luma(pb[yb * sw + xb]))
+                n++
+            }
+        }
+        return if (n == 0) 999.0 else sum / n
     }
 
     private fun luma(p: Int): Int {
@@ -190,8 +142,7 @@ object BurstMerger {
         val pb = IntArray(sw * sh)
         sa.getPixels(pa, 0, sw, 0, 0, sw, sh)
         sb.getPixels(pb, 0, sw, 0, 0, sw, sh)
-
-        val maxShift = 5
+        val maxShift = 4
         var best = Long.MAX_VALUE
         var bestDx = 0
         var bestDy = 0

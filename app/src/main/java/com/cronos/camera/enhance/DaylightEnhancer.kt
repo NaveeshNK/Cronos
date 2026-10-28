@@ -32,9 +32,9 @@ object DaylightEnhancer {
         chromaDenoiseSmooth(pixels, w, h)
         // Extra luma denoise when multi-frame was skipped (more sensor noise left)
         if (singleFrame) {
-            lumaDenoiseSmooth(pixels, w, h, strength = 0.55f * s)
+            lumaDenoiseSmooth(pixels, w, h, strength = 0.28f * s)
         } else {
-            lumaDenoiseSmooth(pixels, w, h, strength = 0.22f * s)
+            lumaDenoiseSmooth(pixels, w, h, strength = 0.12f * s)
         }
 
         var sumY0 = 0.0
@@ -144,7 +144,7 @@ object DaylightEnhancer {
                 val l = luma(copy[i])
                 val edge = abs(l - luma(copy[i - 1])) + abs(l - luma(copy[i + 1])) +
                     abs(l - luma(copy[i - w])) + abs(l - luma(copy[i + w]))
-                if (edge > 22) continue
+                if (edge > 16) continue
 
                 var sum = 0
                 for (dy in -1..1) {
