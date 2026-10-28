@@ -5,10 +5,11 @@ import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.sqrt
 
 /**
- * v16 — single-frame path gets stronger smooth luma denoise.
+ * v18 — local tone: lift shadows/corners, soft highlight roll-off, neutral WB.
  */
 object DaylightEnhancer {
 
@@ -30,7 +31,6 @@ object DaylightEnhancer {
         input.getPixels(pixels, 0, w, 0, 0, w, h)
 
         chromaDenoiseSmooth(pixels, w, h)
-        // Extra luma denoise when multi-frame was skipped (more sensor noise left)
         if (singleFrame) {
             lumaDenoiseSmooth(pixels, w, h, strength = 0.28f * s)
         } else {
@@ -79,17 +79,8 @@ object DaylightEnhancer {
             var cb = 128f - 0.168736f * r - 0.331264f * g + 0.5f * b
             var cr = 128f + 0.5f * r - 0.418688f * g - 0.081312f * b
 
-            if (y < 110f) {
-                val t = 1f - (y / 110f)
-                y = (y + 22f * s * t).coerceIn(0f, 255f)
-            }
-            if (y in 40f..200f) {
-                y = (y + 6f * s).coerceIn(0f, 255f)
-            }
-            if (y > 230f) {
-                val t = (y - 230f) / 25f
-                y = 230f + 25f * (t / (1f + 0.2f * s * t))
-            }
+            // --- Local tone (per-pixel, luma curve) ---
+            y = localToneY(y, s)
 
             val dCb = cb - 128f
             val dCr = cr - 128f
@@ -114,16 +105,19 @@ object DaylightEnhancer {
             out[i] = (a shl 24) or (r.toInt() shl 16) or (g.toInt() shl 8) or b.toInt()
         }
 
+        // Mild global brightness match (local tone already opens shadows)
         val meanY1 = (sumY1 / n).toFloat().coerceAtLeast(1f)
-        val target = meanY0 * (1f + 0.14f * s)
-        val scale = (target / meanY1).coerceIn(1.0f, 1.28f)
-        for (i in out.indices) {
-            val p = out[i]
-            val a = (p ushr 24) and 0xFF
-            val r = (((p shr 16) and 0xFF) * scale).toInt().coerceIn(0, 255)
-            val g = (((p shr 8) and 0xFF) * scale).toInt().coerceIn(0, 255)
-            val b = ((p and 0xFF) * scale).toInt().coerceIn(0, 255)
-            out[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
+        val target = meanY0 * (1f + 0.06f * s)
+        val scale = (target / meanY1).coerceIn(0.98f, 1.18f)
+        if (abs(scale - 1f) > 0.01f) {
+            for (i in out.indices) {
+                val p = out[i]
+                val a = (p ushr 24) and 0xFF
+                val r = (((p shr 16) and 0xFF) * scale).toInt().coerceIn(0, 255)
+                val g = (((p shr 8) and 0xFF) * scale).toInt().coerceIn(0, 255)
+                val b = ((p and 0xFF) * scale).toInt().coerceIn(0, 255)
+                out[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
+            }
         }
 
         edgeAwareClarity(out, w, h, amount = 0.18f * s)
@@ -133,7 +127,27 @@ object DaylightEnhancer {
         return result
     }
 
-    /** Structure-preserving luma smooth on flat regions only. */
+    /**
+     * Local tone curve on luma:
+     * - Strong lift in deep shadows (wardrobe corners)
+     * - Mild mid lift
+     * - Soft highlight compression (ceiling lights)
+     */
+    private fun localToneY(y: Float, s: Float): Float {
+        val yn = (y / 255f).coerceIn(0f, 1f)
+        // Shadow lift: more gain when dark
+        val shadowGain = 1f + (0.55f * s) * Math.pow((1f - yn).toDouble(), 1.4).toFloat()
+        // Mid contrast slight S
+        val mid = yn + 0.04f * s * (yn - 0.5f) * 4f * yn * (1f - yn)
+        var out = (mid * shadowGain).coerceIn(0f, 1.15f)
+        // Highlight roll-off
+        if (out > 0.82f) {
+            val t = (out - 0.82f) / 0.18f
+            out = 0.82f + 0.18f * (t / (1f + 0.7f * s * t))
+        }
+        return (out * 255f).coerceIn(0f, 255f)
+    }
+
     private fun lumaDenoiseSmooth(px: IntArray, w: Int, h: Int, strength: Float) {
         if (strength < 0.05f) return
         val copy = px.copyOf()
@@ -145,7 +159,6 @@ object DaylightEnhancer {
                 val edge = abs(l - luma(copy[i - 1])) + abs(l - luma(copy[i + 1])) +
                     abs(l - luma(copy[i - w])) + abs(l - luma(copy[i + w]))
                 if (edge > 16) continue
-
                 var sum = 0
                 for (dy in -1..1) {
                     for (dx in -1..1) {
