@@ -1,15 +1,12 @@
 package com.cronos.camera.enhance
 
 import android.graphics.Bitmap
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
 
-/**
- * Cronos Color Engine + light smooth-area chroma denoise.
- * Adaptive outdoor chroma stronger than indoor.
- */
 object DaylightEnhancer {
 
     fun enhance(source: Bitmap, strength: Float = 0.82f): Bitmap {
@@ -136,36 +133,28 @@ object DaylightEnhancer {
      */
     private fun chromaDenoiseSmooth(px: IntArray, w: Int, h: Int) {
         val copy = px.copyOf()
-        val step = 1
-        for (y in 1 until h - 1 step step) {
-            for (x in 1 until w - 1 step step) {
+        for (y in 1 until h - 1) {
+            for (x in 1 until w - 1) {
                 val i = y * w + x
                 val l = luma(copy[i])
-                val lx = abs(l - luma(copy[i - 1])) + abs(l - luma(copy[i + 1]))
-                val ly = abs(l - luma(copy[i - w])) + abs(l - luma(copy[i + w]))
-                if (lx + ly > 28) continue // edge / texture — skip
+                val edge = abs(l - luma(copy[i - 1])) + abs(l - luma(copy[i + 1])) +
+                    abs(l - luma(copy[i - w])) + abs(l - luma(copy[i + w]))
+                if (edge > 28) continue
 
                 var cbSum = 0f
                 var crSum = 0f
-                var ySum = 0f
                 for (dy in -1..1) {
                     for (dx in -1..1) {
                         val p = copy[(y + dy) * w + (x + dx)]
                         val r = ((p shr 16) and 0xFF).toFloat()
                         val g = ((p shr 8) and 0xFF).toFloat()
                         val b = (p and 0xFF).toFloat()
-                        val yy = 0.299f * r + 0.587f * g + 0.114f * b
-                        val cb = 128f - 0.168736f * r - 0.331264f * g + 0.5f * b
-                        val cr = 128f + 0.5f * r - 0.418688f * g - 0.081312f * b
-                        ySum += yy
-                        cbSum += cb
-                        crSum += cr
+                        cbSum += 128f - 0.168736f * r - 0.331264f * g + 0.5f * b
+                        crSum += 128f + 0.5f * r - 0.418688f * g - 0.081312f * b
                     }
                 }
-                val yy = ySum / 9f
                 val cb = cbSum / 9f
                 val cr = crSum / 9f
-                // blend 60% smoothed chroma with original luma structure
                 val p0 = copy[i]
                 val r0 = ((p0 shr 16) and 0xFF).toFloat()
                 val g0 = ((p0 shr 8) and 0xFF).toFloat()
@@ -184,13 +173,7 @@ object DaylightEnhancer {
         }
     }
 
-    private fun luma(p: Int): Int {
-        val r = (p shr 16) and 0xFF
-        val g = (p shr 8) and 0xFF
-        val b = p and 0xFF
-        return (r * 3 + g * 6 + b) / 10
-    }
-
+    
     private fun hueBoost(hue: Float): Float {
         val deg = Math.toDegrees(hue.toDouble()).toFloat()
         return when {

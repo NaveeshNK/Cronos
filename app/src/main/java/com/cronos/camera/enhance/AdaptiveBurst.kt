@@ -3,11 +3,8 @@ package com.cronos.camera.enhance
 import android.graphics.Bitmap
 import kotlin.math.abs
 import kotlin.math.max
-import kotlin.math.sqrt
+import kotlin.math.min
 
-/**
- * Decides whether extra frames help. Used after decode.
- */
 object AdaptiveBurst {
     /** Returns recommended merge list: may drop blurry/high-motion frames. */
     fun selectFrames(frames: List<Bitmap>): List<Bitmap> {
