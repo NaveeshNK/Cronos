@@ -107,7 +107,7 @@ private sealed class Screen {
     data class Review(val original: Bitmap, val enhanced: Bitmap) : Screen()
 }
 
-@OptIn(ExperimentalPermissionsApi::class, ExperimentalCamera2Interop::class)
+@OptIn(ExperimentalPermissionsApi::class)
 @Composable
 fun CronosApp() {
     val context = LocalContext.current
@@ -132,7 +132,7 @@ fun CronosApp() {
                     useFront = useFront,
                     processing = processing,
                     burstStatus = burstStatus,
-                    audioGranted = audioGranted,
+                    audioGranted = audioPermission.status.isGranted,
                     onFlip = { useFront = !useFront },
                     onBurstProgress = { burstStatus = it },
                     onCapturedFiles = { files ->

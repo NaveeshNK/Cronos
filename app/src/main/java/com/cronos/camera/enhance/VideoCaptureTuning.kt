@@ -1,34 +1,31 @@
 package com.cronos.camera.enhance
 
 import android.hardware.camera2.CaptureRequest
+import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.CaptureRequestOptions
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
-import androidx.camera.core.ExperimentalCamera2Interop
 
 /**
  * Prefer OIS/EIS and high-quality color path while recording.
- * Full per-frame DaylightEnhancer is photo-only (too heavy for realtime video).
  */
-@OptIn(ExperimentalCamera2Interop::class)
 object VideoCaptureTuning {
 
+    @OptIn(ExperimentalCamera2Interop::class)
     fun applyStabilizationAndColor(camera: Camera?) {
         if (camera == null) return
         runCatching {
             val c2 = Camera2CameraControl.from(camera.cameraControl)
             val builder = CaptureRequestOptions.Builder()
-            // Electronic video stabilization
             builder.setCaptureRequestOption(
                 CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
                 CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
             )
-            // Optical if available
             builder.setCaptureRequestOption(
                 CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
                 CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
             )
-            // Prefer high-quality color correction pipeline
             builder.setCaptureRequestOption(
                 CaptureRequest.COLOR_CORRECTION_MODE,
                 CaptureRequest.COLOR_CORRECTION_MODE_HIGH_QUALITY
