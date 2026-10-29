@@ -8,14 +8,13 @@ import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
- * v20 — detail-confidence sharpen, better AWB, skin protect, strong classical denoise.
- * (TFLite neural denoise deferred — needs shipped model. RAW deferred — device-specific.)
+ * P2 rendering: denoise first, calibrated-ish WB, restrained tone + sharpen.
  */
 object DaylightEnhancer {
 
     fun enhance(
         source: Bitmap,
-        strength: Float = 0.85f,
+        strength: Float = 0.80f,
         singleFrame: Boolean = false
     ): Bitmap {
         val s = strength.coerceIn(0f, 1f)
@@ -30,21 +29,19 @@ object DaylightEnhancer {
         val pixels = IntArray(n)
         input.getPixels(pixels, 0, w, 0, 0, w, h)
 
-        chromaDenoiseSmooth(pixels, w, h)
-        val denoiseAmt = if (singleFrame) 0.32f * s else 0.14f * s
-        lumaDenoiseSmooth(pixels, w, h, strength = denoiseAmt)
+        // Denoise before color (P2 priority)
+        edgeAwareBilateralLite(pixels, w, h, spatial = 1, singleFrame = singleFrame, s = s)
 
         var sumY0 = 0.0
         var sumR = 0.0
         var sumG = 0.0
         var sumB = 0.0
-        // Bright-neutral samples for AWB (top 12% luminance, low chroma)
         var wpR = 0.0
         var wpG = 0.0
         var wpB = 0.0
         var wpN = 0
         val lumaTmp = FloatArray(n)
-        for (i in pixels.indices) {
+        for (i in 0 until n) {
             val p = pixels[i]
             val r = (p shr 16) and 0xFF
             val g = (p shr 8) and 0xFF
@@ -58,19 +55,17 @@ object DaylightEnhancer {
         val avgR = (sumR / n).toFloat()
         val avgG = (sumG / n).toFloat()
         val avgB = (sumB / n).toFloat()
-
-        // Percentile-ish threshold for bright pixels
-        val thresh = meanY0 * 1.25f + 20f
-        for (i in pixels.indices) {
+        val thresh = meanY0 * 1.2f + 25f
+        for (i in 0 until n) {
             val y = lumaTmp[i]
-            if (y < thresh || y > 250f) continue
+            if (y < thresh || y > 248f) continue
             val p = pixels[i]
             val r = ((p shr 16) and 0xFF).toFloat()
             val g = ((p shr 8) and 0xFF).toFloat()
             val b = (p and 0xFF).toFloat()
             val mx = max(r, max(g, b))
             val mn = min(r, min(g, b))
-            if (mx - mn > 28f) continue // not neutral
+            if (mx - mn > 22f) continue
             wpR += r; wpG += g; wpB += b; wpN++
         }
 
@@ -78,28 +73,28 @@ object DaylightEnhancer {
         var gainR: Float
         var gainG: Float
         var gainB: Float
-        if (wpN > 80) {
+        if (wpN > 60) {
             val wr = (wpR / wpN).toFloat()
             val wg = (wpG / wpN).toFloat()
             val wb = (wpB / wpN).toFloat()
             val wavg = (wr + wg + wb) / 3f
-            gainR = (wavg / max(wr, 1f)).coerceIn(0.90f, 1.10f)
-            gainG = (wavg / max(wg, 1f)).coerceIn(0.92f, 1.08f)
-            gainB = (wavg / max(wb, 1f)).coerceIn(0.90f, 1.10f)
+            gainR = (wavg / max(wr, 1f)).coerceIn(0.93f, 1.07f)
+            gainG = (wavg / max(wg, 1f)).coerceIn(0.94f, 1.06f)
+            gainB = (wavg / max(wb, 1f)).coerceIn(0.93f, 1.07f)
         } else {
-            gainR = (avg / max(avgR, 1f)).coerceIn(0.92f, 1.08f)
-            gainG = (avg / max(avgG, 1f)).coerceIn(0.94f, 1.06f)
-            gainB = (avg / max(avgB, 1f)).coerceIn(0.92f, 1.08f)
+            gainR = (avg / max(avgR, 1f)).coerceIn(0.94f, 1.06f)
+            gainG = (avg / max(avgG, 1f)).coerceIn(0.95f, 1.05f)
+            gainB = (avg / max(avgB, 1f)).coerceIn(0.94f, 1.06f)
         }
-        gainR = lerp(1f, gainR, 0.60f * s)
-        gainG = lerp(1f, gainG, 0.60f * s)
-        gainB = lerp(1f, gainB, 0.60f * s)
+        gainR = lerp(1f, gainR, 0.50f * s)
+        gainG = lerp(1f, gainG, 0.50f * s)
+        gainB = lerp(1f, gainB, 0.50f * s)
 
-        val chromaBoost = 1.05f * s
+        val chromaBoost = 0.88f * s
         val out = IntArray(n)
         var sumY1 = 0.0
 
-        for (i in pixels.indices) {
+        for (i in 0 until n) {
             val p = pixels[i]
             val a = (p ushr 24) and 0xFF
             var r = ((p shr 16) and 0xFF) * gainR
@@ -120,14 +115,14 @@ object DaylightEnhancer {
             val chroma = sqrt(dCb * dCb + dCr * dCr)
             val hue = atan2(dCr, dCb)
             val skin = isSkinHue(hue, chroma, y)
-            val hb = if (skin) 0.55f else hueBoost(hue)
+            val hb = if (skin) 0.45f else hueBoost(hue)
             val normC = (chroma / 78f).coerceIn(0f, 1f)
-            val vibrance = 1f + chromaBoost * hb * (1f - normC * 0.40f)
+            val vibrance = 1f + chromaBoost * hb * (1f - normC * 0.45f)
             val protect = when {
-                skin -> 0.25f
-                chroma < 6f -> 0.15f
-                chroma < 14f -> 0.45f
-                else -> 1f
+                skin -> 0.20f
+                chroma < 6f -> 0.12f
+                chroma < 14f -> 0.40f
+                else -> 0.92f
             }
             val factor = 1f + (vibrance - 1f) * protect
             cb = 128f + dCb * factor
@@ -142,10 +137,10 @@ object DaylightEnhancer {
         }
 
         val meanY1 = (sumY1 / n).toFloat().coerceAtLeast(1f)
-        val target = meanY0 * (1f + 0.06f * s)
-        val scale = (target / meanY1).coerceIn(0.98f, 1.18f)
+        val target = meanY0 * (1f + 0.04f * s)
+        val scale = (target / meanY1).coerceIn(0.98f, 1.12f)
         if (abs(scale - 1f) > 0.01f) {
-            for (i in out.indices) {
+            for (i in 0 until n) {
                 val p = out[i]
                 val a = (p ushr 24) and 0xFF
                 val r = (((p shr 16) and 0xFF) * scale).toInt().coerceIn(0, 255)
@@ -155,36 +150,78 @@ object DaylightEnhancer {
             }
         }
 
-        detailConfidenceSharpen(out, w, h, amount = 0.28f * s)
+        detailConfidenceSharpen(out, w, h, amount = 0.16f * s)
 
         val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         result.setPixels(out, 0, w, 0, 0, w, h)
         return result
     }
 
-    /** Skin-ish hue in YCbCr polar space (rough). */
+    /** Edge-aware smooth: stronger on flat, weak on edges (texture keep). */
+    private fun edgeAwareBilateralLite(
+        px: IntArray, w: Int, h: Int, spatial: Int, singleFrame: Boolean, s: Float
+    ) {
+        val copy = px.copyOf()
+        val edgeLimit = if (singleFrame) 14 else 18
+        val blendFlat = if (singleFrame) 0.40f * s else 0.22f * s
+        for (y in spatial until h - spatial) {
+            for (x in spatial until w - spatial) {
+                val i = y * w + x
+                val l = luma(copy[i])
+                val edge = abs(l - luma(copy[i - 1])) + abs(l - luma(copy[i + 1])) +
+                    abs(l - luma(copy[i - w])) + abs(l - luma(copy[i + w]))
+                if (edge > edgeLimit) continue
+                var sr = 0
+                var sg = 0
+                var sb = 0
+                var c = 0
+                for (dy in -spatial..spatial) {
+                    for (dx in -spatial..spatial) {
+                        val p = copy[(y + dy) * w + (x + dx)]
+                        val ll = luma(p)
+                        if (abs(ll - l) > 18) continue
+                        sr += (p shr 16) and 0xFF
+                        sg += (p shr 8) and 0xFF
+                        sb += p and 0xFF
+                        c++
+                    }
+                }
+                if (c < 3) continue
+                val br = sr / c
+                val bg = sg / c
+                val bb = sb / c
+                val p0 = copy[i]
+                val r0 = (p0 shr 16) and 0xFF
+                val g0 = (p0 shr 8) and 0xFF
+                val b0 = p0 and 0xFF
+                val t = blendFlat
+                val r = (r0 * (1 - t) + br * t).toInt().coerceIn(0, 255)
+                val g = (g0 * (1 - t) + bg * t).toInt().coerceIn(0, 255)
+                val b = (b0 * (1 - t) + bb * t).toInt().coerceIn(0, 255)
+                val a = (p0 ushr 24) and 0xFF
+                px[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
+            }
+        }
+    }
+
     private fun isSkinHue(hue: Float, chroma: Float, y: Float): Boolean {
         if (y < 40f || y > 230f || chroma < 8f || chroma > 55f) return false
         val deg = Math.toDegrees(hue.toDouble()).toFloat()
-        // skin often around red-yellow: roughly -20..50 deg in this atan2 space
         return deg >= -25f && deg <= 55f
     }
 
     private fun localToneY(y: Float, s: Float): Float {
         val yn = (y / 255f).coerceIn(0f, 1f)
-        val shadowGain = 1f + (0.55f * s) * Math.pow((1f - yn).toDouble(), 1.4).toFloat()
-        val mid = yn + 0.04f * s * (yn - 0.5f) * 4f * yn * (1f - yn)
-        var out = (mid * shadowGain).coerceIn(0f, 1.15f)
-        if (out > 0.82f) {
-            val t = (out - 0.82f) / 0.18f
-            out = 0.82f + 0.18f * (t / (1f + 0.7f * s * t))
+        val shadowGain = 1f + (0.40f * s) * Math.pow((1f - yn).toDouble(), 1.5).toFloat()
+        val mid = yn + 0.03f * s * (yn - 0.5f) * 4f * yn * (1f - yn)
+        var out = (mid * shadowGain).coerceIn(0f, 1.12f)
+        if (out > 0.85f) {
+            val t = (out - 0.85f) / 0.15f
+            out = 0.85f + 0.15f * (t / (1f + 0.8f * s * t))
         }
         return (out * 255f).coerceIn(0f, 255f)
     }
 
-    /**
-     * Sharpen only where structure is strong AND local noise is low.
-     */
     private fun detailConfidenceSharpen(px: IntArray, w: Int, h: Int, amount: Float) {
         if (amount < 0.02f) return
         val copy = px.copyOf()
@@ -197,58 +234,19 @@ object DaylightEnhancer {
                 val lU = luma(copy[i - w])
                 val lD = luma(copy[i + w])
                 val edge = abs(l - lL) + abs(l - lR) + abs(l - lU) + abs(l - lD)
-                if (edge < 20) continue // flat
-
-                // Local noise proxy: high-frequency variance in 3x3 after edge
+                if (edge < 22) continue
                 var varSum = 0
-                for (dy in -1..1) {
-                    for (dx in -1..1) {
-                        val ll = luma(copy[(y + dy) * w + (x + dx)])
-                        varSum += abs(ll - l)
-                    }
+                for (dy in -1..1) for (dx in -1..1) {
+                    varSum += abs(luma(copy[(y + dy) * w + (x + dx)]) - l)
                 }
-                // High var with moderate edge = texture/noise; need edge dominant
                 val noiseProxy = varSum / 9
-                if (noiseProxy > edge * 1.1f && edge < 40) continue // noisy flat-ish
-
-                val confidence = ((edge - 20f) / 50f).coerceIn(0f, 1f) *
-                    (1f - ((noiseProxy - 8).coerceAtLeast(0) / 40f).coerceIn(0f, 1f))
-                if (confidence < 0.15f) continue
-
+                if (noiseProxy > edge * 1.15f && edge < 45) continue
+                val confidence = ((edge - 22f) / 50f).coerceIn(0f, 1f) *
+                    (1f - ((noiseProxy - 10).coerceAtLeast(0) / 40f).coerceIn(0f, 1f))
+                if (confidence < 0.2f) continue
                 val blur = (lL + lR + lU + lD + l) / 5
                 val detail = l - blur
                 val nl = (l + detail * amount * confidence).toInt().coerceIn(0, 255)
-                val p = copy[i]
-                val r0 = (p shr 16) and 0xFF
-                val g0 = (p shr 8) and 0xFF
-                val b0 = p and 0xFF
-                val y0 = (r0 * 3 + g0 * 6 + b0) / 10
-                if (y0 <= 0) continue
-                val sc = nl.toFloat() / y0
-                val r = (r0 * sc).toInt().coerceIn(0, 255)
-                val g = (g0 * sc).toInt().coerceIn(0, 255)
-                val b = (b0 * sc).toInt().coerceIn(0, 255)
-                val a = (p ushr 24) and 0xFF
-                px[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
-            }
-        }
-    }
-
-    private fun lumaDenoiseSmooth(px: IntArray, w: Int, h: Int, strength: Float) {
-        if (strength < 0.05f) return
-        val copy = px.copyOf()
-        val blend = strength.coerceIn(0f, 0.85f)
-        for (y in 1 until h - 1) {
-            for (x in 1 until w - 1) {
-                val i = y * w + x
-                val l = luma(copy[i])
-                val edge = abs(l - luma(copy[i - 1])) + abs(l - luma(copy[i + 1])) +
-                    abs(l - luma(copy[i - w])) + abs(l - luma(copy[i + w]))
-                if (edge > 16) continue
-                var sum = 0
-                for (dy in -1..1) for (dx in -1..1) sum += luma(copy[(y + dy) * w + (x + dx)])
-                val blur = sum / 9
-                val nl = (l * (1f - blend) + blur * blend).toInt().coerceIn(0, 255)
                 val p = copy[i]
                 val r0 = (p shr 16) and 0xFF
                 val g0 = (p shr 8) and 0xFF
@@ -265,45 +263,6 @@ object DaylightEnhancer {
         }
     }
 
-    private fun chromaDenoiseSmooth(px: IntArray, w: Int, h: Int) {
-        val copy = px.copyOf()
-        for (y in 1 until h - 1) {
-            for (x in 1 until w - 1) {
-                val i = y * w + x
-                val l = luma(copy[i])
-                val edge = abs(l - luma(copy[i - 1])) + abs(l - luma(copy[i + 1])) +
-                    abs(l - luma(copy[i - w])) + abs(l - luma(copy[i + w]))
-                if (edge > 28) continue
-                var cbSum = 0f
-                var crSum = 0f
-                for (dy in -1..1) for (dx in -1..1) {
-                    val p = copy[(y + dy) * w + (x + dx)]
-                    val r = ((p shr 16) and 0xFF).toFloat()
-                    val g = ((p shr 8) and 0xFF).toFloat()
-                    val b = (p and 0xFF).toFloat()
-                    cbSum += 128f - 0.168736f * r - 0.331264f * g + 0.5f * b
-                    crSum += 128f + 0.5f * r - 0.418688f * g - 0.081312f * b
-                }
-                val cb = cbSum / 9f
-                val cr = crSum / 9f
-                val p0 = copy[i]
-                val r0 = ((p0 shr 16) and 0xFF).toFloat()
-                val g0 = ((p0 shr 8) and 0xFF).toFloat()
-                val b0 = (p0 and 0xFF).toFloat()
-                val y0 = 0.299f * r0 + 0.587f * g0 + 0.114f * b0
-                val cb0 = 128f - 0.168736f * r0 - 0.331264f * g0 + 0.5f * b0
-                val cr0 = 128f + 0.5f * r0 - 0.418688f * g0 - 0.081312f * b0
-                val cbM = cb0 * 0.4f + cb * 0.6f
-                val crM = cr0 * 0.4f + cr * 0.6f
-                val r = (y0 + 1.402f * (crM - 128f)).coerceIn(0f, 255f)
-                val g = (y0 - 0.344136f * (cbM - 128f) - 0.714136f * (crM - 128f)).coerceIn(0f, 255f)
-                val b = (y0 + 1.772f * (cbM - 128f)).coerceIn(0f, 255f)
-                val a = (p0 ushr 24) and 0xFF
-                px[i] = (a shl 24) or (r.toInt() shl 16) or (g.toInt() shl 8) or b.toInt()
-            }
-        }
-    }
-
     private fun luma(p: Int): Int {
         val r = (p shr 16) and 0xFF
         val g = (p shr 8) and 0xFF
@@ -314,12 +273,11 @@ object DaylightEnhancer {
     private fun hueBoost(hue: Float): Float {
         val deg = Math.toDegrees(hue.toDouble()).toFloat()
         return when {
-            deg > 20f && deg < 90f -> 1.25f
-            deg >= 90f && deg < 150f -> 1.12f
-            deg >= -180f && deg < -120f -> 1.35f
-            deg >= -120f && deg < -40f -> 1.22f
-            deg >= -40f && deg <= 20f -> 1.15f
-            else -> 1.12f
+            deg > 20f && deg < 90f -> 1.18f
+            deg >= 90f && deg < 150f -> 1.08f
+            deg >= -180f && deg < -120f -> 1.25f
+            deg >= -120f && deg < -40f -> 1.15f
+            else -> 1.08f
         }
     }
 

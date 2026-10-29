@@ -153,30 +153,7 @@ fun CronosApp() {
                                     AdaptiveBurst.selectFrames(frames)
                                 }
                                 val original = withContext(Dispatchers.Default) {
-                                    when {
-                                        selected.size >= 2 -> {
-                                            // Prefer safe merge; if locked, also try HDR blend of pair
-                                            val merged = BurstMerger.merge(selected)
-                                            // Identify darker frame for highlight recovery
-                                            val mean = selected.map { bmp ->
-                                                val px = IntArray(minOf(4096, bmp.width * bmp.height))
-                                                val sw = minOf(64, bmp.width)
-                                                val sh = minOf(64, bmp.height)
-                                                val small = Bitmap.createScaledBitmap(bmp, sw, sh, true)
-                                                val arr = IntArray(sw * sh)
-                                                small.getPixels(arr, 0, sw, 0, 0, sw, sh)
-                                                arr.map { p -> ((p shr 16) and 0xFF) + ((p shr 8) and 0xFF) + (p and 0xFF) }.average()
-                                            }
-                                            val brightIdx = mean.indices.maxByOrNull { mean[it] } ?: 0
-                                            val darkIdx = mean.indices.minByOrNull { mean[it] } ?: 0
-                                            if (brightIdx != darkIdx && mean[brightIdx] > mean[darkIdx] * 1.05) {
-                                                runCatching {
-                                                    HdrBlend.blend(selected[brightIdx], selected[darkIdx])
-                                                }.getOrDefault(merged)
-                                            } else merged
-                                        }
-                                        else -> BurstMerger.merge(selected)
-                                    }
+                                    BurstMerger.merge(selected)
                                 }
                                 // recycle intermediates except if same ref
                                 frames.forEach { if (it != original) runCatching { it.recycle() } }
