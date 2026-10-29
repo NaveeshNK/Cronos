@@ -12,8 +12,8 @@ android {
         applicationId = "com.cronos.camera"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 21
+        versionName = "2.1.0"
     }
 
     signingConfigs {
@@ -66,6 +66,7 @@ dependencies {
     implementation("androidx.camera:camera-camera2:$camera")
     implementation("androidx.camera:camera-lifecycle:$camera")
     implementation("androidx.camera:camera-view:$camera")
+    implementation("androidx.camera:camera-video:$camera")
 
     implementation("com.google.accompanist:accompanist-permissions:0.36.0")
     implementation("androidx.exifinterface:exifinterface:1.3.7")

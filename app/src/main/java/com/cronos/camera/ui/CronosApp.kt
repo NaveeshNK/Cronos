@@ -14,6 +14,21 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
+
+import android.annotation.SuppressLint
+import android.hardware.camera2.CaptureRequest
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+import androidx.camera.video.FileOutputOptions
+import androidx.camera.video.Quality
+import androidx.camera.video.QualitySelector
+import androidx.camera.video.FallbackStrategy
+import androidx.camera.video.Recorder
+import androidx.camera.video.Recording
+import androidx.camera.video.VideoCapture
+import androidx.camera.video.VideoRecordEvent
+import androidx.camera.video.MediaStoreOutputOptions
+import androidx.core.util.Consumer
+import com.cronos.camera.enhance.VideoCaptureTuning
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import com.cronos.camera.enhance.AdaptiveBurst
@@ -92,33 +107,22 @@ private sealed class Screen {
     data class Review(val original: Bitmap, val enhanced: Bitmap) : Screen()
 }
 
-@OptIn(ExperimentalPermissionsApi::class)
+@OptIn(ExperimentalPermissionsApi::class, ExperimentalCamera2Interop::class)
 @Composable
 fun CronosApp() {
     val context = LocalContext.current
     val cameraPermission = rememberPermissionState(Manifest.permission.CAMERA)
+    val audioPermission = rememberPermissionState(Manifest.permission.RECORD_AUDIO)
     var screen by remember { mutableStateOf<Screen>(Screen.Camera) }
     val strength = 0.85f
     var processing by remember { mutableStateOf(false) }
     var burstStatus by remember { mutableStateOf<String?>(null) }
     var useFront by remember { mutableStateOf(false) }
-    // 0=off 1=auto 2=on
-    var flashMode by remember { mutableStateOf(0) }
-    // 0, 3, 5 seconds
-    var timerSec by remember { mutableStateOf(0) }
-    var countdown by remember { mutableStateOf<Int?>(null) }
-
-    LaunchedEffect(flashMode, imageCapture) {
-        imageCapture?.flashMode = when (flashMode) {
-            1 -> ImageCapture.FLASH_MODE_AUTO
-            2 -> ImageCapture.FLASH_MODE_ON
-            else -> ImageCapture.FLASH_MODE_OFF
-        }
-    }
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
         if (!cameraPermission.status.isGranted) cameraPermission.launchPermissionRequest()
+        if (!audioPermission.status.isGranted) audioPermission.launchPermissionRequest()
     }
 
     when (val s = screen) {
@@ -128,6 +132,7 @@ fun CronosApp() {
                     useFront = useFront,
                     processing = processing,
                     burstStatus = burstStatus,
+                    audioGranted = audioGranted,
                     onFlip = { useFront = !useFront },
                     onBurstProgress = { burstStatus = it },
                     onCapturedFiles = { files ->
@@ -246,16 +251,35 @@ private fun CameraBody(
     useFront: Boolean,
     processing: Boolean,
     burstStatus: String?,
+    audioGranted: Boolean,
     onFlip: () -> Unit,
     onCapturedFiles: (List<File>) -> Unit,
     onBurstProgress: (String?) -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val scope = rememberCoroutineScope()
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var boundCamera by remember { mutableStateOf<Camera?>(null) }
+    // 0=off 1=auto 2=on
+    var flashMode by remember { mutableStateOf(0) }
+    // 0, 3, 5 seconds
+    var timerSec by remember { mutableStateOf(0) }
+    var countdown by remember { mutableStateOf<Int?>(null) }
+    var isVideoMode by remember { mutableStateOf(false) }
+    var isRecording by remember { mutableStateOf(false) }
+    var activeRecording by remember { mutableStateOf<Recording?>(null) }
+    var videoCaptureUseCase by remember { mutableStateOf<VideoCapture<Recorder>?>(null) }
     val executor = remember { Executors.newSingleThreadExecutor() }
     DisposableEffect(Unit) { onDispose { executor.shutdown() } }
+
+    LaunchedEffect(flashMode, imageCapture) {
+        imageCapture?.flashMode = when (flashMode) {
+            1 -> ImageCapture.FLASH_MODE_AUTO
+            2 -> ImageCapture.FLASH_MODE_ON
+            else -> ImageCapture.FLASH_MODE_OFF
+        }
+    }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         AndroidView(
@@ -264,28 +288,53 @@ private fun CameraBody(
             },
             modifier = Modifier.fillMaxSize(),
             update = { previewView ->
+                // Rebind when mode / camera / flash changes
+                val modeVideo = isVideoMode
+                val front = useFront
+                val flash = flashMode
                 val future = ProcessCameraProvider.getInstance(context)
                 future.addListener({
                     val provider = future.get()
                     val preview = Preview.Builder().build().also {
                         it.surfaceProvider = previewView.surfaceProvider
                     }
-                    val capture = ImageCapture.Builder()
-                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                        .build()
-                    imageCapture = capture
-                    capture.flashMode = when (flashMode) {
-                        1 -> ImageCapture.FLASH_MODE_AUTO
-                        2 -> ImageCapture.FLASH_MODE_ON
-                        else -> ImageCapture.FLASH_MODE_OFF
-                    }
-                    val selector = if (useFront) CameraSelector.DEFAULT_FRONT_CAMERA
+                    val selector = if (front) CameraSelector.DEFAULT_FRONT_CAMERA
                     else CameraSelector.DEFAULT_BACK_CAMERA
                     try {
                         provider.unbindAll()
-                        boundCamera = provider.bindToLifecycle(lifecycleOwner, selector, preview, capture)
+                        if (modeVideo) {
+                            val qualitySelector = QualitySelector.fromOrderedList(
+                                listOf(Quality.FHD, Quality.HD, Quality.SD),
+                                FallbackStrategy.lowerQualityOrHigherThan(Quality.HD)
+                            )
+                            val recorder = Recorder.Builder()
+                                .setQualitySelector(qualitySelector)
+                                .build()
+                            val videoCapture = VideoCapture.withOutput(recorder)
+                            videoCaptureUseCase = videoCapture
+                            imageCapture = null
+                            boundCamera = provider.bindToLifecycle(
+                                lifecycleOwner, selector, preview, videoCapture
+                            )
+                            VideoCaptureTuning.applyStabilizationAndColor(boundCamera)
+                        } else {
+                            videoCaptureUseCase = null
+                            val capture = ImageCapture.Builder()
+                                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                                .build()
+                            imageCapture = capture
+                            capture.flashMode = when (flash) {
+                                1 -> ImageCapture.FLASH_MODE_AUTO
+                                2 -> ImageCapture.FLASH_MODE_ON
+                                else -> ImageCapture.FLASH_MODE_OFF
+                            }
+                            boundCamera = provider.bindToLifecycle(
+                                lifecycleOwner, selector, preview, capture
+                            )
+                        }
                     } catch (_: Exception) {
                         boundCamera = null
+                        videoCaptureUseCase = null
                     }
                 }, ContextCompat.getMainExecutor(context))
             }
@@ -308,7 +357,32 @@ private fun CameraBody(
                 .padding(top = 48.dp, start = 20.dp)
         ) {
             Text("CRONOS", color = Color(0xFFE8B86D), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
-            Text("v20 · detail · AWB · flash/timer", color = Color(0xFF90A4AE), style = MaterialTheme.typography.bodySmall)
+            Text(
+                if (isVideoMode) "Video · stabilized FHD · HQ denoise path"
+                else "Photo · Cronos color grade",
+                color = Color(0xFF90A4AE),
+                style = MaterialTheme.typography.bodySmall
+            )
+            Row(Modifier.padding(top = 8.dp)) {
+                Text(
+                    "PHOTO",
+                    color = if (!isVideoMode) Color(0xFFE8B86D) else Color.White.copy(alpha = 0.5f),
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .clickable(enabled = !processing && !isRecording) {
+                            isVideoMode = false
+                        }
+                        .padding(end = 16.dp)
+                )
+                Text(
+                    "VIDEO",
+                    color = if (isVideoMode) Color(0xFFE8B86D) else Color.White.copy(alpha = 0.5f),
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.clickable(enabled = !processing && !isRecording) {
+                        isVideoMode = true
+                    }
+                )
+            }
             if (burstStatus != null) {
                 Text(burstStatus, color = Color(0xFFE8B86D), style = MaterialTheme.typography.bodyMedium)
             }
@@ -365,8 +439,61 @@ private fun CameraBody(
                     .background(Color.White.copy(alpha = 0.25f))
                     .padding(5.dp)
                     .clip(CircleShape)
-                    .background(if (processing) Color.Gray else Color(0xFFE8B86D))
+                    .background(when {
+                        processing -> Color.Gray
+                        isRecording -> Color(0xFFE53935)
+                        else -> Color(0xFFE8B86D)
+                    })
                     .clickable(enabled = !processing) {
+                        if (isVideoMode) {
+                            val vc = videoCaptureUseCase
+                            if (vc == null) return@clickable
+                            if (isRecording) {
+                                activeRecording?.stop()
+                                activeRecording = null
+                                isRecording = false
+                                return@clickable
+                            }
+                            // Start recording to MediaStore
+                            val name = "CRONOS_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(System.currentTimeMillis())
+                            val contentValues = ContentValues().apply {
+                                put(MediaStore.MediaColumns.DISPLAY_NAME, "$name.mp4")
+                                put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                    put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/Cronos")
+                                }
+                            }
+                            val output = MediaStoreOutputOptions.Builder(
+                                context.contentResolver,
+                                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                            ).setContentValues(contentValues).build()
+                            val pending = vc.output.prepareRecording(context, output)
+                            @SuppressLint("MissingPermission")
+                            val prepared = if (audioGranted) {
+                                pending.withAudioEnabled()
+                            } else {
+                                pending
+                            }
+                            activeRecording = prepared.start(ContextCompat.getMainExecutor(context)) { event ->
+                                when (event) {
+                                    is VideoRecordEvent.Start -> {
+                                        isRecording = true
+                                        onBurstProgress("Recording…")
+                                    }
+                                    is VideoRecordEvent.Finalize -> {
+                                        isRecording = false
+                                        activeRecording = null
+                                        onBurstProgress(null)
+                                        if (event.hasError()) {
+                                            Toast.makeText(context, "Video error", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            Toast.makeText(context, "Video saved", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                }
+                            }
+                            return@clickable
+                        }
                         val capture = imageCapture ?: return@clickable
                         val camera = boundCamera
                         fun runBurst() {
