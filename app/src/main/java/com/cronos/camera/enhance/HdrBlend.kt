@@ -38,8 +38,8 @@ object HdrBlend {
 
             // Weight: shadows prefer brighter frame (a), highlights prefer darker (b)
             val wDark = when {
-                ya > 210 -> 0.85f
-                ya > 180 -> 0.55f
+                ya > 200 -> 0.90f
+                ya > 170 -> 0.60f
                 ya > 140 -> 0.25f
                 else -> 0f
             }

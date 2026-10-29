@@ -40,6 +40,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.FlashAuto
+import androidx.compose.material.icons.filled.FlashOff
+import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -98,6 +102,19 @@ fun CronosApp() {
     var processing by remember { mutableStateOf(false) }
     var burstStatus by remember { mutableStateOf<String?>(null) }
     var useFront by remember { mutableStateOf(false) }
+    // 0=off 1=auto 2=on
+    var flashMode by remember { mutableStateOf(0) }
+    // 0, 3, 5 seconds
+    var timerSec by remember { mutableStateOf(0) }
+    var countdown by remember { mutableStateOf<Int?>(null) }
+
+    LaunchedEffect(flashMode, imageCapture) {
+        imageCapture?.flashMode = when (flashMode) {
+            1 -> ImageCapture.FLASH_MODE_AUTO
+            2 -> ImageCapture.FLASH_MODE_ON
+            else -> ImageCapture.FLASH_MODE_OFF
+        }
+    }
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
@@ -257,6 +274,11 @@ private fun CameraBody(
                         .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                         .build()
                     imageCapture = capture
+                    capture.flashMode = when (flashMode) {
+                        1 -> ImageCapture.FLASH_MODE_AUTO
+                        2 -> ImageCapture.FLASH_MODE_ON
+                        else -> ImageCapture.FLASH_MODE_OFF
+                    }
                     val selector = if (useFront) CameraSelector.DEFAULT_FRONT_CAMERA
                     else CameraSelector.DEFAULT_BACK_CAMERA
                     try {
@@ -286,9 +308,12 @@ private fun CameraBody(
                 .padding(top = 48.dp, start = 20.dp)
         ) {
             Text("CRONOS", color = Color(0xFFE8B86D), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
-            Text("v13 · 2-frame fusion · edge clarity", color = Color(0xFF90A4AE), style = MaterialTheme.typography.bodySmall)
+            Text("v20 · detail · AWB · flash/timer", color = Color(0xFF90A4AE), style = MaterialTheme.typography.bodySmall)
             if (burstStatus != null) {
                 Text(burstStatus, color = Color(0xFFE8B86D), style = MaterialTheme.typography.bodyMedium)
+            }
+            if (countdown != null) {
+                Text("${countdown}", color = Color(0xFFE8B86D), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.displayMedium)
             }
         }
 
@@ -300,8 +325,37 @@ private fun CameraBody(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = onFlip, enabled = !processing) {
-                Icon(Icons.Default.Cameraswitch, contentDescription = "Flip", tint = Color.White, modifier = Modifier.size(30.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = {
+                    flashMode = (flashMode + 1) % 3
+                }, enabled = !processing && !useFront) {
+                    Icon(
+                        when (flashMode) {
+                            1 -> Icons.Default.FlashAuto
+                            2 -> Icons.Default.FlashOn
+                            else -> Icons.Default.FlashOff
+                        },
+                        contentDescription = "Flash",
+                        tint = Color.White,
+                        modifier = Modifier.size(28.dp)
+                    )
+                }
+                IconButton(onClick = {
+                    timerSec = when (timerSec) {
+                        0 -> 3
+                        3 -> 5
+                        else -> 0
+                    }
+                }, enabled = !processing) {
+                    if (timerSec == 0) {
+                        Icon(Icons.Default.Timer, contentDescription = "Timer", tint = Color.White, modifier = Modifier.size(28.dp))
+                    } else {
+                        Text("${timerSec}s", color = Color(0xFFE8B86D), fontWeight = FontWeight.Bold)
+                    }
+                }
+                IconButton(onClick = onFlip, enabled = !processing) {
+                    Icon(Icons.Default.Cameraswitch, contentDescription = "Flip", tint = Color.White, modifier = Modifier.size(30.dp))
+                }
             }
 
             Box(
@@ -315,74 +369,85 @@ private fun CameraBody(
                     .clickable(enabled = !processing) {
                         val capture = imageCapture ?: return@clickable
                         val camera = boundCamera
-                        val files = mutableListOf<File>()
-                        val motion = MotionGate(context)
-                        motion.start()
-                        fun finish() {
-                            motion.stop()
-                            // restore exposure
-                            runCatching {
-                                camera?.cameraControl?.setExposureCompensationIndex(0)
-                            }
-                            ContextCompat.getMainExecutor(context).execute {
-                                onBurstProgress(null)
-                                onCapturedFiles(files.toList())
-                            }
-                        }
-                        fun captureAt(index: Int, maxFrames: Int) {
-                            if (index >= maxFrames) {
-                                finish()
-                                return
-                            }
-                            // Early-stop: after first frame, skip rest if hand moved
-                            if (index > 0 && motion.isTooMuchMotion(1.6f)) {
-                                ContextCompat.getMainExecutor(context).execute {
-                                    onBurstProgress("Hold steady…")
-                                }
-                                finish()
-                                return
-                            }
-                            ContextCompat.getMainExecutor(context).execute {
-                                onBurstProgress("Capturing ${index + 1}/$maxFrames…")
-                            }
-                            // Bracket: 2nd frame underexposed for highlight recovery
-                            if (index == 1) {
+                        fun runBurst() {
+                            val files = mutableListOf<File>()
+                            val motion = MotionGate(context)
+                            motion.start()
+                            fun finish() {
+                                motion.stop()
                                 runCatching {
-                                    val exp = camera?.cameraInfo?.exposureState
-                                    if (exp != null && exp.isExposureCompensationSupported) {
-                                        val range = exp.exposureCompensationRange
-                                        val step = (-1).coerceIn(range.lower, range.upper)
-                                        camera.cameraControl.setExposureCompensationIndex(step)
-                                    }
+                                    camera?.cameraControl?.setExposureCompensationIndex(0)
+                                }
+                                ContextCompat.getMainExecutor(context).execute {
+                                    onBurstProgress(null)
+                                    onCapturedFiles(files.toList())
                                 }
                             }
-                            val file = File(context.cacheDir, "cronos_${System.currentTimeMillis()}_$index.jpg")
-                            val options = ImageCapture.OutputFileOptions.Builder(file).build()
-                            capture.takePicture(
-                                options,
-                                executor,
-                                object : ImageCapture.OnImageSavedCallback {
-                                    override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                                        files.add(file)
-                                        captureAt(index + 1, maxFrames)
+                            fun captureAt(index: Int, maxFrames: Int) {
+                                if (index >= maxFrames) {
+                                    finish()
+                                    return
+                                }
+                                if (index > 0 && motion.isTooMuchMotion(1.6f)) {
+                                    ContextCompat.getMainExecutor(context).execute {
+                                        onBurstProgress("Hold steady…")
                                     }
-                                    override fun onError(exception: ImageCaptureException) {
-                                        motion.stop()
-                                        if (files.isNotEmpty()) {
-                                            ContextCompat.getMainExecutor(context).execute {
-                                                onBurstProgress(null)
-                                                onCapturedFiles(files.toList())
-                                            }
-                                        } else {
-                                            ContextCompat.getMainExecutor(context).execute {
-                                                Toast.makeText(context, exception.message ?: "Capture error", Toast.LENGTH_SHORT).show()
-                                            }
+                                    finish()
+                                    return
+                                }
+                                ContextCompat.getMainExecutor(context).execute {
+                                    onBurstProgress("Capturing ${index + 1}/$maxFrames…")
+                                }
+                                if (index == 1) {
+                                    runCatching {
+                                        val exp = camera?.cameraInfo?.exposureState
+                                        if (exp != null && exp.isExposureCompensationSupported) {
+                                            val range = exp.exposureCompensationRange
+                                            val step = (-1).coerceIn(range.lower, range.upper)
+                                            camera.cameraControl.setExposureCompensationIndex(step)
                                         }
                                     }
                                 }
-                            )
+                                val file = File(context.cacheDir, "cronos_${System.currentTimeMillis()}_$index.jpg")
+                                val options = ImageCapture.OutputFileOptions.Builder(file).build()
+                                capture.takePicture(
+                                    options,
+                                    executor,
+                                    object : ImageCapture.OnImageSavedCallback {
+                                        override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+                                            files.add(file)
+                                            captureAt(index + 1, maxFrames)
+                                        }
+                                        override fun onError(exception: ImageCaptureException) {
+                                            motion.stop()
+                                            if (files.isNotEmpty()) {
+                                                ContextCompat.getMainExecutor(context).execute {
+                                                    onBurstProgress(null)
+                                                    onCapturedFiles(files.toList())
+                                                }
+                                            } else {
+                                                ContextCompat.getMainExecutor(context).execute {
+                                                    Toast.makeText(context, exception.message ?: "Capture error", Toast.LENGTH_SHORT).show()
+                                                }
+                                            }
+                                        }
+                                    }
+                                )
+                            }
+                            captureAt(0, 2)
                         }
-                        captureAt(0, 2)
+                        if (timerSec > 0) {
+                            scope.launch {
+                                for (t in timerSec downTo 1) {
+                                    countdown = t
+                                    kotlinx.coroutines.delay(1000)
+                                }
+                                countdown = null
+                                runBurst()
+                            }
+                        } else {
+                            runBurst()
+                        }
                     },
                 contentAlignment = Alignment.Center
             ) {
