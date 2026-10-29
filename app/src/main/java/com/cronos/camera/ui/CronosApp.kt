@@ -347,7 +347,7 @@ private fun CameraBody(
             Text("CRONOS", color = Color(0xFFE8B86D), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
             Text(
                 if (isVideoMode) "Video · stabilized FHD · HQ denoise path"
-                else "Photo · Cronos color grade",
+                else "Photo · v24 multi-frame · filmic color",
                 color = Color(0xFF90A4AE),
                 style = MaterialTheme.typography.bodySmall
             )
@@ -554,7 +554,7 @@ private fun CameraBody(
                                     }
                                 )
                             }
-                            captureAt(0, 2)
+                            captureAt(0, 3)
                         }
                         if (timerSec > 0) {
                             scope.launch {

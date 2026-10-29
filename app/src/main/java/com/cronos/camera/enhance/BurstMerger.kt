@@ -2,29 +2,23 @@ package com.cronos.camera.enhance
 
 import android.graphics.Bitmap
 import kotlin.math.abs
+import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
- * Motion-aware safe merger (P0/P1):
- * - Sharpest frame as reference
- * - Translation align on pyramid
- * - Abort full merge if global motion too high
- * - Tile-local consistency: disagreeing tiles use reference only
- * - Invalid border mask after shift (no edge clamp repeat)
+ * v24: confidence + noise-aware tile fusion (HDR+ style ideas on JPEG).
  */
 object BurstMerger {
 
-    private const val MAX_SHIFT_PX = 6
-    private const val TILE = 32
-    private const val TILE_DIFF_ABORT = 18.0  // mean luma diff in tile → use ref
+    private const val MAX_SHIFT_PX = 8
+    private const val TILE = 24
+    private const val TILE_DIFF_ABORT = 16.0
 
     fun merge(frames: List<Bitmap>): Bitmap {
         require(frames.isNotEmpty())
-        if (frames.size == 1) {
-            return frames[0].copy(Bitmap.Config.ARGB_8888, false)
-        }
+        if (frames.size == 1) return frames[0].copy(Bitmap.Config.ARGB_8888, false)
 
         val w = frames.minOf { it.width }
         val h = frames.minOf { it.height }
@@ -53,13 +47,11 @@ object BurstMerger {
             val (dx, dy) = estimateShift(refBmp, scaled[i])
             val dist = sqrt((dx * dx + dy * dy).toDouble())
             if (dist > MAX_SHIFT_PX) {
-                // Global motion — return sharpest only
                 return refBmp.copy(Bitmap.Config.ARGB_8888, false)
             }
             val pair = shiftWithMask(scaled[i], w, h, dx, dy)
-            // Global consistency check on valid overlap
             val md = meanDiffValid(ref, pair.first, pair.second)
-            if (md > 22.0) {
+            if (md > 20.0) {
                 return refBmp.copy(Bitmap.Config.ARGB_8888, false)
             }
             aligned.add(Aligned(pair.first, pair.second))
@@ -69,10 +61,10 @@ object BurstMerger {
             return refBmp.copy(Bitmap.Config.ARGB_8888, false)
         }
 
-        // Tile-local merge: only average tiles that agree with reference
         val out = IntArray(w * h)
         val tilesX = (w + TILE - 1) / TILE
         val tilesY = (h + TILE - 1) / TILE
+
         for (ty in 0 until tilesY) {
             for (tx in 0 until tilesX) {
                 val x0 = tx * TILE
@@ -80,12 +72,12 @@ object BurstMerger {
                 val x1 = min(w, x0 + TILE)
                 val y1 = min(h, y0 + TILE)
 
-                // Which secondary frames are consistent in this tile?
-                val use = BooleanArray(aligned.size)
-                use[0] = true
-                var count = 1
+                // Per-frame weight for this tile (ref always 1)
+                val weight = FloatArray(aligned.size)
+                weight[0] = 1f
+                var sumW = 1f
                 for (f in 1 until aligned.size) {
-                    var sum = 0.0
+                    var diffSum = 0.0
                     var n = 0
                     var y = y0
                     while (y < y1) {
@@ -93,44 +85,52 @@ object BurstMerger {
                         while (x < x1) {
                             val i = y * w + x
                             if (aligned[f].valid[i]) {
-                                sum += abs(luma(ref[i]) - luma(aligned[f].px[i]))
+                                diffSum += abs(luma(ref[i]) - luma(aligned[f].px[i]))
                                 n++
                             }
                             x++
                         }
                         y++
                     }
-                    val avg = if (n > 0) sum / n else 999.0
-                    if (avg <= TILE_DIFF_ABORT) {
-                        use[f] = true
-                        count++
+                    val avg = if (n > 0) diffSum / n else 999.0
+                    if (avg > TILE_DIFF_ABORT) {
+                        weight[f] = 0f
+                    } else {
+                        // Soft confidence: lower diff → higher weight
+                        val wF = exp((-avg * avg) / (2.0 * 9.0 * 9.0)).toFloat()
+                        weight[f] = wF
+                        sumW += wF
                     }
                 }
 
                 for (y in y0 until y1) {
                     for (x in x0 until x1) {
                         val i = y * w + x
-                        if (count <= 1) {
+                        if (sumW < 1.01f) {
                             out[i] = ref[i]
                             continue
                         }
-                        var r = 0
-                        var g = 0
-                        var b = 0
-                        var c = 0
+                        var r = 0f
+                        var g = 0f
+                        var b = 0f
+                        var c = 0f
                         for (f in aligned.indices) {
-                            if (!use[f]) continue
+                            val wf = weight[f]
+                            if (wf <= 0.001f) continue
                             if (f > 0 && !aligned[f].valid[i]) continue
                             val p = aligned[f].px[i]
-                            r += (p shr 16) and 0xFF
-                            g += (p shr 8) and 0xFF
-                            b += p and 0xFF
-                            c++
+                            r += ((p shr 16) and 0xFF) * wf
+                            g += ((p shr 8) and 0xFF) * wf
+                            b += (p and 0xFF) * wf
+                            c += wf
                         }
-                        if (c <= 0) {
+                        if (c < 0.01f) {
                             out[i] = ref[i]
                         } else {
-                            out[i] = (0xFF shl 24) or ((r / c) shl 16) or ((g / c) shl 8) or (b / c)
+                            out[i] = (0xFF shl 24) or
+                                ((r / c).toInt().coerceIn(0, 255) shl 16) or
+                                ((g / c).toInt().coerceIn(0, 255) shl 8) or
+                                (b / c).toInt().coerceIn(0, 255)
                         }
                     }
                 }
@@ -192,7 +192,7 @@ object BurstMerger {
         val pb = IntArray(sw * sh)
         sa.getPixels(pa, 0, sw, 0, 0, sw, sh)
         sb.getPixels(pb, 0, sw, 0, 0, sw, sh)
-        val maxShift = 5
+        val maxShift = 6
         var best = Long.MAX_VALUE
         var bestDx = 0
         var bestDy = 0
@@ -203,10 +203,8 @@ object BurstMerger {
                 while (y < sh - maxShift) {
                     var x = maxShift
                     while (x < sw - maxShift) {
-                        val ia = y * sw + x
-                        val ib = (y + dy) * sw + (x + dx)
-                        val ca = pa[ia]
-                        val cb = pb[ib]
+                        val ca = pa[y * sw + x]
+                        val cb = pb[(y + dy) * sw + (x + dx)]
                         sad += abs(((ca shr 16) and 0xFF) - ((cb shr 16) and 0xFF))
                         sad += abs(((ca shr 8) and 0xFF) - ((cb shr 8) and 0xFF))
                         sad += abs((ca and 0xFF) - (cb and 0xFF))
@@ -221,12 +219,9 @@ object BurstMerger {
                 }
             }
         }
-        val scaleX = a.width / sw
-        val scaleY = a.height / sh
-        return Pair(bestDx * scaleX, bestDy * scaleY)
+        return Pair(bestDx * (a.width / sw), bestDy * (a.height / sh))
     }
 
-    /** Shift without edge clamp-repeat; invalid outside source. */
     private fun shiftWithMask(src: Bitmap, w: Int, h: Int, dx: Int, dy: Int): Pair<IntArray, BooleanArray> {
         val srcPx = IntArray(w * h)
         src.getPixels(srcPx, 0, w, 0, 0, w, h)
@@ -246,7 +241,6 @@ object BurstMerger {
                     out[i] = srcPx[sy * w + sx]
                     valid[i] = true
                 } else {
-                    out[i] = 0
                     valid[i] = false
                 }
             }

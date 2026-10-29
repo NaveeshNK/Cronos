@@ -6,10 +6,7 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * P1 frame selection:
- * - Rank by normalized sharpness
- * - After coarse align estimate, reject frames that cannot register
- * - Prefer frames consistent with sharpest reference
+ * v24: pick up to 3 frames — sharpest ref + frames that align & agree.
  */
 object AdaptiveBurst {
 
@@ -23,12 +20,11 @@ object AdaptiveBurst {
         usable.add(best.bmp)
 
         for (s in scored.drop(1)) {
-            if (s.sharp < best.sharp * 0.50) continue
+            if (s.sharp < best.sharp * 0.55) continue
             val (dx, dy) = coarseShift(best.bmp, s.bmp)
-            val dist = abs(dx) + abs(dy)
-            if (dist > 8) continue // cannot register cheaply
+            if (abs(dx) + abs(dy) > 10) continue
             val diff = meanAbsDiffAligned(best.bmp, s.bmp, dx, dy)
-            if (diff > 26.0) continue
+            if (diff > 24.0) continue
             usable.add(s.bmp)
             if (usable.size >= 3) break
         }
@@ -50,23 +46,23 @@ object AdaptiveBurst {
                 val l = luma(px[i])
                 sum += abs(l - luma(px[i + 1])) + abs(l - luma(px[i + w]))
                 n++
-                x += 4
+                x += 3
             }
-            y += 4
+            y += 3
         }
         return if (n == 0) 0.0 else sum / n
     }
 
     private fun coarseShift(a: Bitmap, b: Bitmap): Pair<Int, Int> {
-        val sw = max(32, a.width / 10)
-        val sh = max(32, a.height / 10)
+        val sw = max(40, a.width / 10)
+        val sh = max(40, a.height / 10)
         val sa = Bitmap.createScaledBitmap(a, sw, sh, true)
         val sb = Bitmap.createScaledBitmap(b, sw, sh, true)
         val pa = IntArray(sw * sh)
         val pb = IntArray(sw * sh)
         sa.getPixels(pa, 0, sw, 0, 0, sw, sh)
         sb.getPixels(pb, 0, sw, 0, 0, sw, sh)
-        val maxShift = 4
+        val maxShift = 5
         var best = Long.MAX_VALUE
         var bestDx = 0
         var bestDy = 0
@@ -77,9 +73,7 @@ object AdaptiveBurst {
                 while (y < sh - maxShift) {
                     var x = maxShift
                     while (x < sw - maxShift) {
-                        val ia = y * sw + x
-                        val ib = (y + dy) * sw + (x + dx)
-                        sad += abs(luma(pa[ia]) - luma(pb[ib]))
+                        sad += abs(luma(pa[y * sw + x]) - luma(pb[(y + dy) * sw + (x + dx)]))
                         x += 2
                     }
                     y += 2
