@@ -56,6 +56,7 @@ import androidx.compose.material.icons.filled.Cameraswitch
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.FlashAuto
 import androidx.compose.material.icons.filled.FlashOff
 import androidx.compose.material.icons.filled.FlashOn
@@ -104,6 +105,7 @@ import kotlinx.coroutines.withContext
 
 private sealed class Screen {
     data object Camera : Screen()
+    data object Gallery : Screen()
     data class Review(val original: Bitmap, val enhanced: Bitmap) : Screen()
 }
 
@@ -126,6 +128,9 @@ fun CronosApp() {
     }
 
     when (val s = screen) {
+        is Screen.Gallery -> {
+            GalleryScreen(onBack = { screen = Screen.Camera })
+        }
         is Screen.Camera -> {
             if (cameraPermission.status.isGranted) {
                 CameraBody(
@@ -134,6 +139,7 @@ fun CronosApp() {
                     burstStatus = burstStatus,
                     audioGranted = audioPermission.status.isGranted,
                     onFlip = { useFront = !useFront },
+                    onOpenGallery = { screen = Screen.Gallery },
                     onBurstProgress = { burstStatus = it },
                     onCapturedFiles = { files ->
                         processing = true
@@ -253,6 +259,7 @@ private fun CameraBody(
     burstStatus: String?,
     audioGranted: Boolean,
     onFlip: () -> Unit,
+    onOpenGallery: () -> Unit = {},
     onCapturedFiles: (List<File>) -> Unit,
     onBurstProgress: (String?) -> Unit = {}
 ) {
@@ -309,8 +316,12 @@ private fun CameraBody(
                             )
                             val recorder = Recorder.Builder()
                                 .setQualitySelector(qualitySelector)
+                                // ~12 Mbps FHD — cleaner than default on many devices
+                                .setTargetVideoEncodingBitRate(12_000_000)
                                 .build()
-                            val videoCapture = VideoCapture.withOutput(recorder)
+                            val videoCapture = VideoCapture.Builder(recorder)
+                                .setVideoStabilizationEnabled(true)
+                                .build()
                             videoCaptureUseCase = videoCapture
                             imageCapture = null
                             boundCamera = provider.bindToLifecycle(
@@ -427,9 +438,13 @@ private fun CameraBody(
                         Text("${timerSec}s", color = Color(0xFFE8B86D), fontWeight = FontWeight.Bold)
                     }
                 }
-                IconButton(onClick = onFlip, enabled = !processing) {
+                IconButton(onClick = onFlip, enabled = !processing && !isRecording) {
                     Icon(Icons.Default.Cameraswitch, contentDescription = "Flip", tint = Color.White, modifier = Modifier.size(30.dp))
                 }
+            }
+            // Right side: open library
+            IconButton(onClick = onOpenGallery, enabled = !processing && !isRecording) {
+                Icon(Icons.Default.PhotoLibrary, contentDescription = "Gallery", tint = Color.White, modifier = Modifier.size(30.dp))
             }
 
             Box(
@@ -478,7 +493,8 @@ private fun CameraBody(
                                 when (event) {
                                     is VideoRecordEvent.Start -> {
                                         isRecording = true
-                                        onBurstProgress("Recording…")
+                                        VideoCaptureTuning.applyStabilizationAndColor(boundCamera)
+                                        onBurstProgress("REC · stabilized")
                                     }
                                     is VideoRecordEvent.Finalize -> {
                                         isRecording = false
