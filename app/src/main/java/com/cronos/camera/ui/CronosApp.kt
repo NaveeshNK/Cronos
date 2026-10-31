@@ -190,7 +190,7 @@ fun CronosApp() {
                                         singleFrame = selected.size <= 1
                                     )
                                     if (captureMode == CaptureMode.PORTRAIT) {
-                                        e = PortraitEffect.apply(e, blurStrength = 0.7f)
+                                        e = PortraitEffect.apply(e, blurStrength = 0.88f)
                                     }
                                     e
                                 }
@@ -411,7 +411,7 @@ private fun CameraBody(
             Text(
                 when (captureMode) {
                     CaptureMode.VIDEO -> "Video · FHD · stabilized"
-                    CaptureMode.PORTRAIT -> "Portrait · soft background"
+                    CaptureMode.PORTRAIT -> "Portrait · subject mask · bokeh"
                     CaptureMode.NIGHT -> "Night · multi-frame denoise"
                     else -> "Photo · computational"
                 },
