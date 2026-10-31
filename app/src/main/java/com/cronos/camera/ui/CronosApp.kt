@@ -363,9 +363,11 @@ private fun CameraBody(
         val cam = boundCamera ?: return
         val pv = previewViewRef ?: return
         val meteringPoint = pv.meteringPointFactory.createPoint(x, y)
+        // AF only — including AE makes dark subjects force the whole frame brighter
+        // and blows out portrait backgrounds.
         val action = FocusMeteringAction.Builder(
             meteringPoint,
-            FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
+            FocusMeteringAction.FLAG_AF
         ).setAutoCancelDuration(3, TimeUnit.SECONDS).build()
         runCatching { cam.cameraControl.startFocusAndMetering(action) }
         focusRing = Offset(x, y)
