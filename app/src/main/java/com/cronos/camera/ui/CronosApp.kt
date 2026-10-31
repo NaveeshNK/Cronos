@@ -169,10 +169,10 @@ fun CronosApp() {
                                 val selected = withContext(Dispatchers.Default) {
                                     AdaptiveBurst.selectFrames(mergeInputs)
                                 }
-                                val merged = withContext(Dispatchers.Default) {
+                                val merged: Bitmap = withContext(Dispatchers.Default) {
                                     BurstMerger.merge(selected)
                                 }
-                                val original = withContext(Dispatchers.Default) {
+                                val original: Bitmap = withContext(Dispatchers.Default) {
                                     HdrHighlightRecover.recover(merged, shortFrame)
                                 }
                                 frames.forEach { bmp ->
@@ -514,7 +514,8 @@ private fun CameraBody(
             }
         }
 
-
+        Row(
+            Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .padding(bottom = 36.dp, start = 24.dp, end = 24.dp),
