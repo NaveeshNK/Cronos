@@ -20,7 +20,6 @@ import androidx.camera.core.Preview
 
 import android.annotation.SuppressLint
 import android.hardware.camera2.CaptureRequest
-import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.video.FileOutputOptions
 import androidx.camera.video.Quality
 import androidx.camera.video.QualitySelector
@@ -291,6 +290,8 @@ private fun ultraWideBackSelector(): CameraSelector {
         .build()
 }
 
+@OptIn(ExperimentalCamera2Interop::class)
+@Composable
 private fun CameraBody(
     useFront: Boolean,
     processing: Boolean,
@@ -435,7 +436,7 @@ private fun CameraBody(
         // Rule-of-thirds grid
         if (showGrid) {
             androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
-                val c = Color(0xFF52FEFE).copy(alpha = 0.22f)
+                val c = Color(0xFF00F2FE).copy(alpha = 0.18f)
                 val stroke = 1.2f
                 drawLine(c, androidx.compose.ui.geometry.Offset(size.width / 3f, 0f), androidx.compose.ui.geometry.Offset(size.width / 3f, size.height), stroke)
                 drawLine(c, androidx.compose.ui.geometry.Offset(2f * size.width / 3f, 0f), androidx.compose.ui.geometry.Offset(2f * size.width / 3f, size.height), stroke)
@@ -444,27 +445,58 @@ private fun CameraBody(
             }
         }
 
+        // Top brand + mode carousel (minimal futuristic)
         Column(
             Modifier
-                .align(Alignment.TopStart)
-                .padding(top = 48.dp, start = 20.dp)
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .padding(top = 40.dp, start = 16.dp, end = 16.dp)
         ) {
-            Text("CRONOS", color = Color(0xFFE8B86D), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
-            Text(
-                when (captureMode) {
-                    CaptureMode.VIDEO -> "Video · FHD · stabilized"
-                    CaptureMode.PORTRAIT -> "Portrait · subject mask · bokeh"
-                    CaptureMode.NIGHT -> "Night · multi-frame denoise"
-                    else -> "Photo · computational"
-                },
-                color = Color(0xFF90A4AE),
-                style = MaterialTheme.typography.bodySmall
-            )
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier
+                            .size(28.dp)
+                            .background(Color(0xFF00F2FE).copy(alpha = 0.12f), CircleShape)
+                            .border(1.dp, Color(0xFF00F2FE).copy(alpha = 0.35f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.CameraAlt, null, tint = Color(0xFF00F2FE), modifier = Modifier.size(14.dp))
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Column {
+                        Text(
+                            "CRONOS",
+                            color = Color.White,
+                            fontWeight = FontWeight.ExtraBold,
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Text(
+                            when (captureMode) {
+                                CaptureMode.VIDEO -> "Video · FHD · stabilized"
+                                CaptureMode.PORTRAIT -> "Portrait · subject mask · bokeh"
+                                CaptureMode.NIGHT -> "Night · multi-frame denoise"
+                                else -> "Photo · computational"
+                            },
+                            color = Color(0xFF94A3B8),
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            // Mode glass pill
             Row(
                 Modifier
-                    .padding(top = 10.dp)
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    .fillMaxWidth()
+                    .background(Color(0x990F1420), RoundedCornerShape(50))
+                    .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(50))
+                    .padding(4.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly
             ) {
                 listOf(
                     CaptureMode.PHOTO to "PHOTO",
@@ -475,37 +507,50 @@ private fun CameraBody(
                     val selected = captureMode == mode
                     Text(
                         label,
-                        color = if (selected) Color(0xFF052028) else Color.White.copy(alpha = 0.75f),
-                        fontWeight = FontWeight.Bold,
-                        style = MaterialTheme.typography.labelLarge,
+                        color = if (selected) Color(0xFF07090E) else Color(0xFF94A3B8),
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                        style = MaterialTheme.typography.labelMedium,
                         modifier = Modifier
                             .background(
-                                if (selected) Color(0xFF52FEFE) else Color.White.copy(alpha = 0.12f),
-                                RoundedCornerShape(20.dp)
+                                if (selected) Color(0xFF00F2FE) else Color.Transparent,
+                                RoundedCornerShape(50)
                             )
                             .clickable(enabled = !processing && !isRecording) {
                                 onCaptureModeChange(mode)
                                 isVideoMode = mode == CaptureMode.VIDEO
                             }
-                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
                     )
                 }
             }
-            
             if (burstStatus != null) {
-                Text(burstStatus, color = Color(0xFFE8B86D), style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    burstStatus!!,
+                    color = Color(0xFF00F2FE),
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
             }
             if (countdown != null) {
-                Text("${countdown}", color = Color(0xFFE8B86D), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.displayMedium)
+                Text(
+                    "${countdown}",
+                    color = Color(0xFF00F2FE),
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.displayMedium,
+                    modifier = Modifier.align(Alignment.CenterHorizontally).padding(top = 24.dp)
+                )
             }
         }
 
-        // Zoom: 0.6× = ultrawide camera (like MIUI); 1/2/5 = main + digital zoom
+        // Zoom glass pill
         Row(
             Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 168.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                .padding(bottom = 156.dp)
+                .background(Color(0x990F1420), RoundedCornerShape(50))
+                .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(50))
+                .padding(horizontal = 6.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             data class ZoomOpt(val label: String, val ultra: Boolean, val ratio: Float)
@@ -526,15 +571,14 @@ private fun CameraBody(
                 val on = if (opt.ultra) (useUltraWide && !useFront) else nonUltraSelected
                 Text(
                     opt.label,
-                    color = if (on) Color(0xFF052028) else Color.White,
-                    fontWeight = FontWeight.Bold,
-                    style = MaterialTheme.typography.labelLarge,
+                    color = if (on) Color(0xFF07090E) else Color(0xFF94A3B8),
+                    fontWeight = if (on) FontWeight.SemiBold else FontWeight.Medium,
+                    style = MaterialTheme.typography.labelMedium,
                     modifier = Modifier
                         .background(
-                            if (on) Color(0xFFE8B86D) else Color.Black.copy(alpha = 0.45f),
-                            CircleShape
+                            if (on) Color(0xFF00F2FE) else Color.Transparent,
+                            RoundedCornerShape(50)
                         )
-                        .border(1.dp, Color(0xFF52FEFE).copy(alpha = 0.5f), CircleShape)
                         .clickable(enabled = !processing && !isRecording && !(opt.ultra && useFront)) {
                             if (opt.ultra) {
                                 useUltraWide = true
@@ -554,7 +598,10 @@ private fun CameraBody(
             Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .padding(bottom = 36.dp, start = 24.dp, end = 24.dp),
+                .padding(bottom = 28.dp, start = 16.dp, end = 16.dp)
+                .background(Color(0xA60A0D14), RoundedCornerShape(28.dp))
+                .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(28.dp))
+                .padding(horizontal = 14.dp, vertical = 12.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -569,8 +616,8 @@ private fun CameraBody(
                             else -> Icons.Default.FlashOff
                         },
                         contentDescription = "Flash",
-                        tint = Color.White,
-                        modifier = Modifier.size(28.dp)
+                        tint = Color(0xFFE2E8F0),
+                        modifier = Modifier.size(24.dp)
                     )
                 }
                 IconButton(onClick = {
