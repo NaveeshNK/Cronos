@@ -1,5 +1,3 @@
-@file:OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
-
 package com.cronos.camera.ui
 
 
@@ -265,34 +263,33 @@ fun CronosApp() {
     }
 }
 
-@Composable
-
-
 @OptIn(ExperimentalCamera2Interop::class)
-private fun ultraWideBackSelector(): CameraSelector {
-    return CameraSelector.Builder()
-        .requireLensFacing(CameraSelector.LENS_FACING_BACK)
-        .addCameraFilter { cameraInfos ->
-            data class Cand(val info: androidx.camera.core.CameraInfo, val focal: Float)
-            val cands = cameraInfos.mapNotNull { info ->
-                try {
-                    val c2 = Camera2CameraInfo.from(info)
-                    val focals = c2.getCameraCharacteristic(
-                        CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS
-                    ) ?: return@mapNotNull null
-                    val minF = focals.minOrNull() ?: return@mapNotNull null
-                    Cand(info, minF)
-                } catch (_: Throwable) {
-                    null
+private object UltraWideLens {
+    fun cameraSelector(): CameraSelector {
+        return CameraSelector.Builder()
+            .requireLensFacing(CameraSelector.LENS_FACING_BACK)
+            .addCameraFilter { cameraInfos ->
+                data class Cand(val info: androidx.camera.core.CameraInfo, val focal: Float)
+                val cands = cameraInfos.mapNotNull { info ->
+                    try {
+                        val c2 = Camera2CameraInfo.from(info)
+                        val focals = c2.getCameraCharacteristic(
+                            CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS
+                        ) ?: return@mapNotNull null
+                        val minF = focals.minOrNull() ?: return@mapNotNull null
+                        Cand(info, minF)
+                    } catch (_: Throwable) {
+                        null
+                    }
                 }
+                if (cands.isEmpty()) return@addCameraFilter cameraInfos
+                val widest = cands.minByOrNull { it.focal } ?: return@addCameraFilter cameraInfos
+                listOf(widest.info)
             }
-            if (cands.isEmpty()) return@addCameraFilter cameraInfos
-            val widest = cands.minByOrNull { it.focal } ?: return@addCameraFilter cameraInfos
-            // Prefer shortest focal length (ultrawide). If only one camera, still return it.
-            listOf(widest.info)
-        }
-        .build()
+            .build()
+    }
 }
+
 
 @OptIn(ExperimentalCamera2Interop::class)
 @Composable
@@ -388,7 +385,7 @@ private fun CameraBody(
                     val ultra = useUltraWide && !front
                     val selector = when {
                         front -> CameraSelector.DEFAULT_FRONT_CAMERA
-                        ultra -> ultraWideBackSelector()
+                        ultra -> UltraWideLens.cameraSelector()
                         else -> CameraSelector.DEFAULT_BACK_CAMERA
                     }
                     try {
