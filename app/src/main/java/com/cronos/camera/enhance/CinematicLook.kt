@@ -12,7 +12,7 @@ import kotlin.math.sqrt
  */
 object CinematicLook {
 
-    fun apply(source: Bitmap, amount: Float = 0.72f): Bitmap {
+    fun apply(source: Bitmap, amount: Float = 0.52f): Bitmap {
         val a = amount.coerceIn(0f, 1f)
         if (a < 0.05f) return source
 
@@ -67,7 +67,7 @@ object CinematicLook {
 
                 // Mild midtone saturation for "shine" / pop
                 val mid = 1f - kotlin.math.abs(yL - 0.5f) * 2f
-                val sat = 1f + 0.12f * a * mid.coerceIn(0f, 1f)
+                val sat = 1f + 0.06f * a * mid.coerceIn(0f, 1f)
                 val gray = 0.2126f * r + 0.7152f * g + 0.0722f * b
                 r = gray + (r - gray) * sat
                 g = gray + (g - gray) * sat

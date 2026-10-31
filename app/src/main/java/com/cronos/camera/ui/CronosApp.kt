@@ -201,7 +201,7 @@ fun CronosApp() {
                                         str,
                                         singleFrame = selected.size <= 1
                                     ).let {
-                                        val cineAmt = if (captureMode == CaptureMode.PORTRAIT) 0.45f else 0.78f
+                                        val cineAmt = if (captureMode == CaptureMode.PORTRAIT) 0.32f else 0.52f
                                         CinematicLook.apply(it, amount = cineAmt)
                                     }
                                     if (captureMode == CaptureMode.PORTRAIT) {
