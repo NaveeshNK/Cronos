@@ -200,9 +200,12 @@ fun CronosApp() {
                                         original,
                                         str,
                                         singleFrame = selected.size <= 1
-                                    ).let { CinematicLook.apply(it, amount = 0.78f) }
+                                    ).let {
+                                        val cineAmt = if (captureMode == CaptureMode.PORTRAIT) 0.45f else 0.78f
+                                        CinematicLook.apply(it, amount = cineAmt)
+                                    }
                                     if (captureMode == CaptureMode.PORTRAIT) {
-                                        e = PortraitEffect.apply(e, blurStrength = 0.88f)
+                                        e = PortraitEffect.apply(e, blurStrength = 0.92f)
                                     }
                                     e
                                 }

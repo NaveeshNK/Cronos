@@ -9,17 +9,12 @@ import com.google.mlkit.vision.segmentation.subject.SubjectSegmenterOptions
 import java.nio.FloatBuffer
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
-import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
- * Portrait closer to iPhone approach:
- * 1) Subject segmentation mask (ML Kit) — people / pets / prominent objects
- * 2) Soft feathered edge
- * 3) Stronger multi-pass blur only on background
- * 4) Fallback: edge + center guided mask if ML Kit fails / no subject
+ * Portrait: clean subject (bright + sharp), soft background, minimal edge ghosting.
  */
 object PortraitEffect {
 
@@ -30,29 +25,40 @@ object PortraitEffect {
         SubjectSegmentation.getClient(options)
     }
 
-    fun apply(source: Bitmap, blurStrength: Float = 0.85f): Bitmap {
+    fun apply(source: Bitmap, blurStrength: Float = 0.9f): Bitmap {
         val w = source.width
         val h = source.height
         val src = if (source.config == Bitmap.Config.ARGB_8888) source
         else source.copy(Bitmap.Config.ARGB_8888, false)
 
-        val mask = trySubjectMask(src) ?: fallbackMask(src)
-        val feathered = featherMask(mask, w, h, radius = max(3, min(w, h) / 120))
+        val rawMask = trySubjectMask(src) ?: fallbackMask(src)
+        // Narrower feather = less ghost halo
+        val feathered = featherMask(rawMask, w, h, radius = max(2, min(w, h) / 180))
+        // Harden mask: subject stays solid longer
+        val mask = FloatArray(w * h)
+        for (i in mask.indices) {
+            val v = feathered[i]
+            // smoothstep toward binary — reduces semi-transparent ghost
+            val t = ((v - 0.25f) / 0.45f).coerceIn(0f, 1f)
+            mask[i] = t * t * (3f - 2f * t)
+        }
 
-        val bgBlur = multiPassBlur(src, passes = 3)
-        val strength = blurStrength.coerceIn(0.3f, 1f)
+        val bgBlur = multiPassBlur(src, passes = 4)
+        val strength = blurStrength.coerceIn(0.4f, 1f)
 
-        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val sp = IntArray(w * h)
         val bp = IntArray(w * h)
         src.getPixels(sp, 0, w, 0, 0, w, h)
         bgBlur.getPixels(bp, 0, w, 0, 0, w, h)
 
+        // Unsharp subject copy
+        val sharp = sp.copyOf()
+        unsharpSubject(sharp, mask, w, h, amount = 0.55f)
+
+        val outPx = IntArray(w * h)
         for (i in 0 until w * h) {
-            // mask: 1 = subject (sharp), 0 = background (blur)
-            val m = feathered[i]
-            val t = ((1f - m) * strength).coerceIn(0f, 1f)
-            val a = sp[i]
+            val m = mask[i] // 1 = subject
+            val a = sharp[i]
             val b = bp[i]
             val ar = (a shr 16) and 0xFF
             val ag = (a shr 8) and 0xFF
@@ -60,16 +66,60 @@ object PortraitEffect {
             val br = (b shr 16) and 0xFF
             val bg = (b shr 8) and 0xFF
             val bb = b and 0xFF
-            // Slight subject lift (iPhone-ish subject pop)
-            val lift = 1f + 0.04f * m * strength
-            val r = ((ar * (1 - t) + br * t) * lift).toInt().coerceIn(0, 255)
-            val g = ((ag * (1 - t) + bg * t) * lift).toInt().coerceIn(0, 255)
-            val bl = ((ab * (1 - t) + bb * t) * lift).toInt().coerceIn(0, 255)
-            out.setPixel(i % w, i / w, Color.argb(255, r, g, bl))
+
+            // Background mix only where mask is low
+            val bgMix = ((1f - m) * strength).coerceIn(0f, 1f)
+
+            // Subject: brighter + slightly more vivid
+            val pop = 1f + 0.10f * m   // brightness
+            val satBoost = 1f + 0.08f * m
+            var r = ar * pop
+            var g = ag * pop
+            var bl = ab * pop
+            val gray = 0.299f * r + 0.587f * g + 0.114f * bl
+            r = gray + (r - gray) * satBoost
+            g = gray + (g - gray) * satBoost
+            bl = gray + (bl - gray) * satBoost
+
+            val fr = (r * (1f - bgMix) + br * bgMix).toInt().coerceIn(0, 255)
+            val fg = (g * (1f - bgMix) + bg * bgMix).toInt().coerceIn(0, 255)
+            val fb = (bl * (1f - bgMix) + bb * bgMix).toInt().coerceIn(0, 255)
+            outPx[i] = (0xFF shl 24) or (fr shl 16) or (fg shl 8) or fb
         }
 
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        out.setPixels(outPx, 0, w, 0, 0, w, h)
         runCatching { bgBlur.recycle() }
         return out
+    }
+
+    /** Sharpen only solid subject pixels to avoid edge ringing/ghost. */
+    private fun unsharpSubject(px: IntArray, mask: FloatArray, w: Int, h: Int, amount: Float) {
+        val copy = px.copyOf()
+        for (y in 1 until h - 1) {
+            for (x in 1 until w - 1) {
+                val i = y * w + x
+                if (mask[i] < 0.55f) continue
+                val c = copy[i]
+                val l = luma(c)
+                var sum = 0
+                var n = 0
+                for (dy in -1..1) for (dx in -1..1) {
+                    if (dx == 0 && dy == 0) continue
+                    sum += luma(copy[(y + dy) * w + (x + dx)])
+                    n++
+                }
+                val blurL = sum / n.toFloat()
+                val delta = (l - blurL) * amount * mask[i]
+                val r = ((c shr 16) and 0xFF) + delta
+                val g = ((c shr 8) and 0xFF) + delta
+                val b = (c and 0xFF) + delta
+                px[i] = (0xFF shl 24) or
+                    (r.toInt().coerceIn(0, 255) shl 16) or
+                    (g.toInt().coerceIn(0, 255) shl 8) or
+                    b.toInt().coerceIn(0, 255)
+            }
+        }
     }
 
     private fun trySubjectMask(src: Bitmap): FloatArray? {
@@ -81,11 +131,7 @@ object PortraitEffect {
             val w = src.width
             val h = src.height
             val n = w * h
-            if (buf.remaining() < n) {
-                // mask may be model size — scale
-                val mw = result.foregroundConfidenceMask?.let { /* use bitmap dims if any */ null }
-                return scaleMaskBuffer(buf, src)
-            }
+            if (buf.remaining() < n) return scaleMaskBuffer(buf, src)
             val mask = FloatArray(n)
             var sum = 0f
             for (i in 0 until n) {
@@ -93,7 +139,6 @@ object PortraitEffect {
                 mask[i] = v
                 sum += v
             }
-            // No real subject detected
             if (sum / n < 0.02f) return null
             mask
         } catch (_: Throwable) {
@@ -105,7 +150,6 @@ object PortraitEffect {
         return try {
             buf.rewind()
             val remaining = buf.remaining()
-            // assume square-ish model output
             val side = sqrt(remaining.toDouble()).toInt()
             if (side * side != remaining) return null
             val small = FloatArray(remaining)
@@ -126,7 +170,6 @@ object PortraitEffect {
         }
     }
 
-    /** Fallback: center + high local structure kept sharp (works for flowers too). */
     private fun fallbackMask(src: Bitmap): FloatArray {
         val w = src.width
         val h = src.height
@@ -134,9 +177,9 @@ object PortraitEffect {
         src.getPixels(px, 0, w, 0, 0, w, h)
         val mask = FloatArray(w * h)
         val cx = w * 0.5f
-        val cy = h * 0.45f
-        val rx = w * 0.36f
-        val ry = h * 0.40f
+        val cy = h * 0.42f
+        val rx = w * 0.32f
+        val ry = h * 0.38f
         for (y in 1 until h - 1) {
             for (x in 1 until w - 1) {
                 val i = y * w + x
@@ -146,25 +189,23 @@ object PortraitEffect {
                 val nx = (x - cx) / rx
                 val ny = (y - cy) / ry
                 val d = sqrt(nx * nx + ny * ny)
-                val center = (1f - ((d - 0.15f) / 0.95f).coerceIn(0f, 1f))
-                val edgeBoost = (edge / 80f).coerceIn(0f, 0.35f)
-                mask[i] = (center * 0.75f + edgeBoost * center).coerceIn(0f, 1f)
+                val center = (1f - ((d - 0.1f) / 0.85f).coerceIn(0f, 1f))
+                val edgeBoost = (edge / 90f).coerceIn(0f, 0.25f)
+                mask[i] = (center * 0.8f + edgeBoost * center).coerceIn(0f, 1f)
             }
         }
         return mask
     }
 
     private fun featherMask(mask: FloatArray, w: Int, h: Int, radius: Int): FloatArray {
-        val out = mask.copyOf()
         val tmp = FloatArray(mask.size)
-        // box blur mask for soft transitions (hair/edges)
+        val out = FloatArray(mask.size)
         for (y in 0 until h) {
             for (x in 0 until w) {
                 var s = 0f
                 var c = 0
                 for (dx in -radius..radius) {
-                    val xx = (x + dx).coerceIn(0, w - 1)
-                    s += mask[y * w + xx]
+                    s += mask[y * w + (x + dx).coerceIn(0, w - 1)]
                     c++
                 }
                 tmp[y * w + x] = s / c
@@ -175,13 +216,10 @@ object PortraitEffect {
                 var s = 0f
                 var c = 0
                 for (dy in -radius..radius) {
-                    val yy = (y + dy).coerceIn(0, h - 1)
-                    s += tmp[yy * w + x]
+                    s += tmp[(y + dy).coerceIn(0, h - 1) * w + x]
                     c++
                 }
-                // smoothstep for cleaner subject edge
-                val v = (s / c).coerceIn(0f, 1f)
-                out[y * w + x] = v * v * (3f - 2f * v)
+                out[y * w + x] = (s / c).coerceIn(0f, 1f)
             }
         }
         return out
@@ -193,8 +231,8 @@ object PortraitEffect {
         repeat(passes) {
             val w = cur.width
             val h = cur.height
-            val nw = max(32, w / 2)
-            val nh = max(32, h / 2)
+            val nw = max(24, w / 2)
+            val nh = max(24, h / 2)
             val small = Bitmap.createScaledBitmap(cur, nw, nh, true)
             val blurred = boxBlur3(small)
             val full = Bitmap.createScaledBitmap(blurred, w, h, true)
