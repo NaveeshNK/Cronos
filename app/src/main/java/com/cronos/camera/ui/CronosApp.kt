@@ -36,9 +36,16 @@ import com.cronos.camera.enhance.BurstMerger
 import com.cronos.camera.enhance.DaylightEnhancer
 import com.cronos.camera.enhance.HdrBlend
 import com.cronos.camera.enhance.MotionGate
+import com.cronos.camera.enhance.HdrHighlightRecover
+import com.cronos.camera.enhance.PortraitEffect
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -69,6 +76,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -103,6 +112,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+private enum class CaptureMode { PHOTO, PORTRAIT, NIGHT, VIDEO }
+
 private sealed class Screen {
     data object Camera : Screen()
     data object Gallery : Screen()
@@ -120,6 +131,7 @@ fun CronosApp() {
     var processing by remember { mutableStateOf(false) }
     var burstStatus by remember { mutableStateOf<String?>(null) }
     var useFront by remember { mutableStateOf(false) }
+    var captureMode by remember { mutableStateOf(CaptureMode.PHOTO) }
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
@@ -138,6 +150,8 @@ fun CronosApp() {
                     processing = processing,
                     burstStatus = burstStatus,
                     audioGranted = audioPermission.status.isGranted,
+                    captureMode = captureMode,
+                    onCaptureModeChange = { captureMode = it },
                     onFlip = { useFront = !useFront },
                     onOpenGallery = { screen = Screen.Gallery },
                     onBurstProgress = { burstStatus = it },
@@ -149,20 +163,36 @@ fun CronosApp() {
                                 val frames = withContext(Dispatchers.IO) {
                                     files.map { decodeAndOrient(it, mirrorHorizontal = useFront) }
                                 }
+                                // Last file may be short-exposure (EC -1); keep aside for highlights
+                                val shortFrame = if (frames.size >= 3) frames.last() else null
+                                val mergeInputs = if (frames.size >= 3) frames.dropLast(1) else frames
                                 val selected = withContext(Dispatchers.Default) {
-                                    AdaptiveBurst.selectFrames(frames)
+                                    AdaptiveBurst.selectFrames(mergeInputs)
                                 }
-                                val original = withContext(Dispatchers.Default) {
+                                val merged = withContext(Dispatchers.Default) {
                                     BurstMerger.merge(selected)
                                 }
-                                // recycle intermediates except if same ref
-                                frames.forEach { if (it != original) runCatching { it.recycle() } }
+                                val original = withContext(Dispatchers.Default) {
+                                    HdrHighlightRecover.recover(merged, shortFrame)
+                                }
+                                frames.forEach { bmp ->
+                                    if (bmp !== original && bmp !== merged) runCatching { bmp.recycle() }
+                                }
                                 val enhanced = withContext(Dispatchers.Default) {
-                                    DaylightEnhancer.enhance(
+                                    val str = when (captureMode) {
+                                        CaptureMode.NIGHT -> (strength + 0.12f).coerceAtMost(1f)
+                                        CaptureMode.PORTRAIT -> strength * 0.9f
+                                        else -> strength
+                                    }
+                                    var e = DaylightEnhancer.enhance(
                                         original,
-                                        strength,
+                                        str,
                                         singleFrame = selected.size <= 1
                                     )
+                                    if (captureMode == CaptureMode.PORTRAIT) {
+                                        e = PortraitEffect.apply(e, blurStrength = 0.7f)
+                                    }
+                                    e
                                 }
                                 screen = Screen.Review(original, enhanced)
                             } catch (e: Exception) {
@@ -235,6 +265,8 @@ private fun CameraBody(
     processing: Boolean,
     burstStatus: String?,
     audioGranted: Boolean,
+    captureMode: CaptureMode,
+    onCaptureModeChange: (CaptureMode) -> Unit,
     onFlip: () -> Unit,
     onOpenGallery: () -> Unit = {},
     onCapturedFiles: (List<File>) -> Unit,
@@ -250,7 +282,11 @@ private fun CameraBody(
     // 0, 3, 5 seconds
     var timerSec by remember { mutableStateOf(0) }
     var countdown by remember { mutableStateOf<Int?>(null) }
-    var isVideoMode by remember { mutableStateOf(false) }
+    var isVideoMode by remember { mutableStateOf(captureMode == CaptureMode.VIDEO) }
+    var zoomRatio by remember { mutableStateOf(1.0f) }
+    var showGrid by remember { mutableStateOf(true) }
+    var minZoom by remember { mutableStateOf(0.6f) }
+    var maxZoom by remember { mutableStateOf(8f) }
     var isRecording by remember { mutableStateOf(false) }
     var activeRecording by remember { mutableStateOf<Recording?>(null) }
     var videoCaptureUseCase by remember { mutableStateOf<VideoCapture<Recorder>?>(null) }
@@ -264,6 +300,31 @@ private fun CameraBody(
             else -> ImageCapture.FLASH_MODE_OFF
         }
     }
+    LaunchedEffect(boundCamera) {
+        val cam = boundCamera ?: return@LaunchedEffect
+        runCatching {
+            val zs = cam.cameraInfo.zoomState.value
+            if (zs != null) {
+                minZoom = zs.minZoomRatio
+                maxZoom = zs.maxZoomRatio
+                // Prefer starting near 0.6 if hardware allows, else min
+                val start = maxOf(minZoom, 0.6f).coerceAtMost(maxZoom)
+                zoomRatio = start
+                cam.cameraControl.setZoomRatio(start)
+            }
+        }
+    }
+    LaunchedEffect(zoomRatio, boundCamera) {
+        boundCamera?.cameraControl?.setZoomRatio(
+            zoomRatio.coerceIn(minZoom, maxZoom)
+        )
+    }
+        LaunchedEffect(captureMode) {
+        isVideoMode = captureMode == CaptureMode.VIDEO
+        if (captureMode == CaptureMode.PORTRAIT) {
+            zoomRatio = 2f.coerceIn(minZoom, maxZoom)
+        }
+    }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         AndroidView(
@@ -273,7 +334,7 @@ private fun CameraBody(
             modifier = Modifier.fillMaxSize(),
             update = { previewView ->
                 // Rebind when mode / camera / flash changes
-                val modeVideo = isVideoMode
+                val modeVideo = captureMode == CaptureMode.VIDEO
                 val front = useFront
                 val flash = flashMode
                 val future = ProcessCameraProvider.getInstance(context)
@@ -330,13 +391,15 @@ private fun CameraBody(
 
 
         // Rule-of-thirds grid
-        androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
-            val c = Color.White.copy(alpha = 0.25f)
-            val stroke = 1.5f
-            drawLine(c, androidx.compose.ui.geometry.Offset(size.width / 3f, 0f), androidx.compose.ui.geometry.Offset(size.width / 3f, size.height), stroke)
-            drawLine(c, androidx.compose.ui.geometry.Offset(2f * size.width / 3f, 0f), androidx.compose.ui.geometry.Offset(2f * size.width / 3f, size.height), stroke)
-            drawLine(c, androidx.compose.ui.geometry.Offset(0f, size.height / 3f), androidx.compose.ui.geometry.Offset(size.width, size.height / 3f), stroke)
-            drawLine(c, androidx.compose.ui.geometry.Offset(0f, 2f * size.height / 3f), androidx.compose.ui.geometry.Offset(size.width, 2f * size.height / 3f), stroke)
+        if (showGrid) {
+            androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
+                val c = Color(0xFF52FEFE).copy(alpha = 0.22f)
+                val stroke = 1.2f
+                drawLine(c, androidx.compose.ui.geometry.Offset(size.width / 3f, 0f), androidx.compose.ui.geometry.Offset(size.width / 3f, size.height), stroke)
+                drawLine(c, androidx.compose.ui.geometry.Offset(2f * size.width / 3f, 0f), androidx.compose.ui.geometry.Offset(2f * size.width / 3f, size.height), stroke)
+                drawLine(c, androidx.compose.ui.geometry.Offset(0f, size.height / 3f), androidx.compose.ui.geometry.Offset(size.width, size.height / 3f), stroke)
+                drawLine(c, androidx.compose.ui.geometry.Offset(0f, 2f * size.height / 3f), androidx.compose.ui.geometry.Offset(size.width, 2f * size.height / 3f), stroke)
+            }
         }
 
         Column(
@@ -346,11 +409,46 @@ private fun CameraBody(
         ) {
             Text("CRONOS", color = Color(0xFFE8B86D), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
             Text(
-                if (isVideoMode) "Video · stabilized FHD · HQ denoise path"
-                else "Photo · v24 multi-frame · filmic color",
+                when (captureMode) {
+                    CaptureMode.VIDEO -> "Video · FHD · stabilized"
+                    CaptureMode.PORTRAIT -> "Portrait · soft background"
+                    CaptureMode.NIGHT -> "Night · multi-frame denoise"
+                    else -> "Photo · computational"
+                },
                 color = Color(0xFF90A4AE),
                 style = MaterialTheme.typography.bodySmall
             )
+            Row(
+                Modifier
+                    .padding(top = 10.dp)
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                listOf(
+                    CaptureMode.PHOTO to "PHOTO",
+                    CaptureMode.PORTRAIT to "PORTRAIT",
+                    CaptureMode.NIGHT to "NIGHT",
+                    CaptureMode.VIDEO to "VIDEO"
+                ).forEach { (mode, label) ->
+                    val selected = captureMode == mode
+                    Text(
+                        label,
+                        color = if (selected) Color(0xFF052028) else Color.White.copy(alpha = 0.75f),
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier
+                            .background(
+                                if (selected) Color(0xFF52FEFE) else Color.White.copy(alpha = 0.12f),
+                                RoundedCornerShape(20.dp)
+                            )
+                            .clickable(enabled = !processing && !isRecording) {
+                                onCaptureModeChange(mode)
+                                isVideoMode = mode == CaptureMode.VIDEO
+                            }
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                    )
+                }
+            }
             Row(Modifier.padding(top = 8.dp)) {
                 Text(
                     "PHOTO",
@@ -381,6 +479,42 @@ private fun CameraBody(
 
         Row(
             Modifier
+
+        // Zoom pills (flagship-style 0.6 / 1 / 2 / 5)
+        Row(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 168.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            val presets = listOf(0.6f, 1f, 2f, 5f)
+            presets.forEach { z ->
+                val available = z <= maxZoom + 0.05f && z >= minZoom - 0.05f || z == 0.6f
+                val target = z.coerceIn(minZoom, maxZoom)
+                val selected = kotlin.math.abs(zoomRatio - target) < 0.15f ||
+                    (z == 0.6f && kotlin.math.abs(zoomRatio - minZoom) < 0.15f)
+                val label = if (z < 1f) String.format("%.1f×", z) else "${z.toInt()}×"
+                Text(
+                    label,
+                    color = if (selected) Color(0xFF052028) else Color.White,
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.labelLarge,
+                    modifier = Modifier
+                        .background(
+                            if (selected) Color(0xFFE8B86D) else Color.Black.copy(alpha = 0.45f),
+                            CircleShape
+                        )
+                        .border(1.dp, Color(0xFF52FEFE).copy(alpha = 0.5f), CircleShape)
+                        .clickable(enabled = !processing && !isRecording) {
+                            zoomRatio = if (z <= minZoom) minZoom else target
+                        }
+                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                )
+            }
+        }
+
+
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .padding(bottom = 36.dp, start = 24.dp, end = 24.dp),
@@ -518,14 +652,20 @@ private fun CameraBody(
                                 ContextCompat.getMainExecutor(context).execute {
                                     onBurstProgress("Capturing ${index + 1}/$maxFrames…")
                                 }
-                                if (index == 1) {
+                                // Last frame slightly underexposed for highlight recovery
+                                if (index == maxFrames - 1) {
                                     runCatching {
                                         val exp = camera?.cameraInfo?.exposureState
                                         if (exp != null && exp.isExposureCompensationSupported) {
                                             val range = exp.exposureCompensationRange
                                             val step = (-1).coerceIn(range.lower, range.upper)
                                             camera.cameraControl.setExposureCompensationIndex(step)
+                                            Thread.sleep(90)
                                         }
+                                    }
+                                } else {
+                                    runCatching {
+                                        camera?.cameraControl?.setExposureCompensationIndex(0)
                                     }
                                 }
                                 val file = File(context.cacheDir, "cronos_${System.currentTimeMillis()}_$index.jpg")
@@ -554,7 +694,12 @@ private fun CameraBody(
                                     }
                                 )
                             }
-                            captureAt(0, 3)
+                            val framesWanted = when (captureMode) {
+                                CaptureMode.NIGHT -> 5
+                                CaptureMode.PORTRAIT -> 2
+                                else -> 3
+                            }
+                            captureAt(0, framesWanted)
                         }
                         if (timerSec > 0) {
                             scope.launch {
