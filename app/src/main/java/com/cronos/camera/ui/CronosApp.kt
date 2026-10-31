@@ -1,5 +1,9 @@
 package com.cronos.camera.ui
 
+// build-fix: width-import + badge + file-OptIn v3
+
+@file:OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
+
 import android.Manifest
 import android.content.ContentValues
 import android.content.Context
@@ -58,6 +62,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -465,7 +470,7 @@ private fun CameraBody(
                             .border(1.dp, Color(0xFF00F2FE).copy(alpha = 0.35f), CircleShape),
                         contentAlignment = Alignment.Center
                     ) {
-                        Icon(Icons.Default.CameraAlt, null, tint = Color(0xFF00F2FE), modifier = Modifier.size(14.dp))
+                        Box(Modifier.size(8.dp).background(Color(0xFF00F2FE), CircleShape))
                     }
                     Spacer(Modifier.width(10.dp))
                     Column {
