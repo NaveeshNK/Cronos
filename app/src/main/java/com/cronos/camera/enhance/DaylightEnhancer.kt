@@ -15,7 +15,7 @@ object DaylightEnhancer {
 
     fun enhance(
         source: Bitmap,
-        strength: Float = 0.82f,
+        strength: Float = 0.88f,
         singleFrame: Boolean = false
     ): Bitmap {
         val s = strength.coerceIn(0f, 1f)
@@ -91,7 +91,7 @@ object DaylightEnhancer {
 
         val out = IntArray(n)
         var sumY1 = 0.0
-        val chromaAmt = 0.75f * s
+        val chromaAmt = 0.98f * s
 
         for (i in 0 until n) {
             val p = pixels[i]
@@ -117,7 +117,7 @@ object DaylightEnhancer {
             val hb = if (skin) 0.35f else selectiveChroma(hue)
             val normC = (chroma / 70f).coerceIn(0f, 1f)
             // Vibrance: boost weak colors more than already saturated
-            val vib = 1f + chromaAmt * hb * (1f - normC * 0.55f)
+            val vib = 1f + chromaAmt * hb * (1f - normC * 0.40f)
             val protect = when {
                 skin -> 0.18f
                 chroma < 5f -> 0.10f
@@ -176,11 +176,11 @@ object DaylightEnhancer {
     private fun selectiveChroma(hue: Float): Float {
         val deg = Math.toDegrees(hue.toDouble()).toFloat()
         return when {
-            deg > 15f && deg < 85f -> 1.12f   // greens — careful
-            deg >= 85f && deg < 150f -> 1.05f
-            deg >= -180f && deg < -100f -> 1.20f // blues
-            deg >= -100f && deg < -20f -> 1.14f
-            else -> 1.10f // reds/yellows
+            deg >= -20f && deg < 50f -> 1.00f // skin-adjacent — mild lift
+            deg >= 50f && deg < 150f -> 1.18f // greens
+            deg >= -180f && deg < -100f -> 1.32f // blues
+            deg >= -100f && deg < -20f -> 1.24f
+            else -> 1.22f // reds/yellows/pinks
         }
     }
 
