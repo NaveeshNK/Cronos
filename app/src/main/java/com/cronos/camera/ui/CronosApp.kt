@@ -1,8 +1,7 @@
+@file:OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
+
 package com.cronos.camera.ui
 
-// build-fix: width-import + badge + file-OptIn v3
-
-@file:OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
 
 import android.Manifest
 import android.content.ContentValues
