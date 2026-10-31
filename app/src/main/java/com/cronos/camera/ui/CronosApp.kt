@@ -45,6 +45,7 @@ import com.cronos.camera.enhance.HdrBlend
 import com.cronos.camera.enhance.MotionGate
 import com.cronos.camera.enhance.HdrHighlightRecover
 import com.cronos.camera.enhance.PortraitEffect
+import com.cronos.camera.enhance.CinematicLook
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -199,7 +200,7 @@ fun CronosApp() {
                                         original,
                                         str,
                                         singleFrame = selected.size <= 1
-                                    )
+                                    ).let { CinematicLook.apply(it, amount = 0.78f) }
                                     if (captureMode == CaptureMode.PORTRAIT) {
                                         e = PortraitEffect.apply(e, blurStrength = 0.88f)
                                     }
