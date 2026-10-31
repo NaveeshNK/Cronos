@@ -46,6 +46,7 @@ import com.cronos.camera.enhance.MotionGate
 import com.cronos.camera.enhance.HdrHighlightRecover
 import com.cronos.camera.enhance.PortraitEffect
 import com.cronos.camera.enhance.CinematicLook
+import com.cronos.camera.enhance.NightEnhance
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -203,6 +204,9 @@ fun CronosApp() {
                                     ).let {
                                         val cineAmt = if (captureMode == CaptureMode.PORTRAIT) 0.32f else 0.52f
                                         CinematicLook.apply(it, amount = cineAmt)
+                                    }
+                                    if (captureMode == CaptureMode.NIGHT) {
+                                        e = NightEnhance.apply(e, amount = 1.05f)
                                     }
                                     if (captureMode == CaptureMode.PORTRAIT) {
                                         e = PortraitEffect.apply(e, blurStrength = 0.92f)
@@ -473,8 +477,13 @@ private fun CameraBody(
                         } else {
                             videoCaptureUseCase = null
                             val capture = ImageCapture.Builder()
-                                // flash applied after bind via flashMode state
-                                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                                // Night: max quality / longer exposure bias from HAL
+                                .setCaptureMode(
+                                    if (captureMode == CaptureMode.NIGHT)
+                                        ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
+                                    else
+                                        ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
+                                )
                                 .build()
                             imageCapture = capture
                             capture.flashMode = when (flash) {
@@ -886,7 +895,7 @@ private fun CameraBody(
                                 )
                             }
                             val framesWanted = when (captureMode) {
-                                CaptureMode.NIGHT -> 5
+                                CaptureMode.NIGHT -> 6
                                 CaptureMode.PORTRAIT -> 2
                                 else -> 3
                             }
