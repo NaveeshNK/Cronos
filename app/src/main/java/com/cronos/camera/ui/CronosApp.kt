@@ -338,6 +338,7 @@ private fun CameraBody(
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var boundCamera by remember { mutableStateOf<Camera?>(null) }
     var focusRing by remember { mutableStateOf<Offset?>(null) }
+    var previewViewRef by remember { mutableStateOf<PreviewView?>(null) }
     // 0=off 1=auto 2=on
     var flashMode by remember { mutableStateOf(0) }
     // 0, 3, 5 seconds
@@ -354,6 +355,22 @@ private fun CameraBody(
     var videoCaptureUseCase by remember { mutableStateOf<VideoCapture<Recorder>?>(null) }
     val executor = remember { Executors.newSingleThreadExecutor() }
     DisposableEffect(Unit) { onDispose { executor.shutdown() } }
+
+    fun performTapFocus(x: Float, y: Float) {
+        val cam = boundCamera ?: return
+        val pv = previewViewRef ?: return
+        val meteringPoint = pv.meteringPointFactory.createPoint(x, y)
+        val action = FocusMeteringAction.Builder(
+            meteringPoint,
+            FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
+        ).setAutoCancelDuration(3, TimeUnit.SECONDS).build()
+        runCatching { cam.cameraControl.startFocusAndMetering(action) }
+        focusRing = Offset(x, y)
+        scope.launch {
+            delay(1400)
+            if (focusRing == Offset(x, y)) focusRing = null
+        }
+    }
 
     LaunchedEffect(flashMode, imageCapture, boundCamera) {
         val mode = when (flashMode) {
@@ -405,6 +422,7 @@ private fun CameraBody(
             },
             modifier = Modifier.fillMaxSize(),
             update = { previewView ->
+                previewViewRef = previewView
                 // Rebind when mode / camera / flash changes
                 val modeVideo = captureMode == CaptureMode.VIDEO
                 val front = useFront
@@ -415,29 +433,6 @@ private fun CameraBody(
                     val provider = future.get()
                     val preview = Preview.Builder().build().also {
                         it.surfaceProvider = previewView.surfaceProvider
-                    }
-                    // Tap to focus + AE
-                    previewView.setOnTouchListener { _, event ->
-                        if (event.action == MotionEvent.ACTION_UP) {
-                            val cam = boundCamera
-                            if (cam != null) {
-                                val point = previewView.meteringPointFactory
-                                    .createPoint(event.x, event.y)
-                                val action = FocusMeteringAction.Builder(
-                                    point,
-                                    FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
-                                ).setAutoCancelDuration(3, TimeUnit.SECONDS).build()
-                                runCatching { cam.cameraControl.startFocusAndMetering(action) }
-                                focusRing = Offset(event.x, event.y)
-                                scope.launch {
-                                    kotlinx.coroutines.delay(1400)
-                                    focusRing = null
-                                }
-                            }
-                            true
-                        } else {
-                            false
-                        }
                     }
                     val selector = when {
                         front -> CameraSelector.DEFAULT_FRONT_CAMERA
@@ -493,21 +488,7 @@ private fun CameraBody(
         // Rule-of-thirds grid
         }
 
-        // Tap-to-focus reticle
-        focusRing?.let { pt ->
-            Box(
-                Modifier
-                    .offset {
-                        androidx.compose.ui.unit.IntOffset(
-                            (pt.x - 40).toInt().coerceAtLeast(0),
-                            (pt.y - 40).toInt().coerceAtLeast(0)
-                        )
-                    }
-                    .size(80.dp)
-                    .border(1.5.dp, Color(0xFF00F2FE).copy(alpha = 0.85f), CircleShape)
-            )
-        }
-
+        // Grid under focus layer (draw only — no hit target)
         if (showGrid) {
             androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
                 val c = Color(0xFF00F2FE).copy(alpha = 0.18f)
@@ -516,6 +497,31 @@ private fun CameraBody(
                 drawLine(c, androidx.compose.ui.geometry.Offset(2f * size.width / 3f, 0f), androidx.compose.ui.geometry.Offset(2f * size.width / 3f, size.height), stroke)
                 drawLine(c, androidx.compose.ui.geometry.Offset(0f, size.height / 3f), androidx.compose.ui.geometry.Offset(size.width, size.height / 3f), stroke)
                 drawLine(c, androidx.compose.ui.geometry.Offset(0f, 2f * size.height / 3f), androidx.compose.ui.geometry.Offset(size.width, 2f * size.height / 3f), stroke)
+            }
+        }
+
+        // Tap-to-focus layer above preview/grid, below chrome buttons
+        Box(
+            Modifier
+                .fillMaxSize()
+                .pointerInput(boundCamera, previewViewRef) {
+                    detectTapGestures { tapOffset ->
+                        performTapFocus(tapOffset.x, tapOffset.y)
+                    }
+                }
+        ) {
+            focusRing?.let { pt ->
+                Box(
+                    Modifier
+                        .offset {
+                            androidx.compose.ui.unit.IntOffset(
+                                (pt.x - 36).toInt().coerceAtLeast(0),
+                                (pt.y - 36).toInt().coerceAtLeast(0)
+                            )
+                        }
+                        .size(72.dp)
+                        .border(2.dp, Color(0xFF00F2FE), CircleShape)
+                )
             }
         }
 
