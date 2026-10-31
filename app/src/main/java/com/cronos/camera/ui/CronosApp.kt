@@ -12,6 +12,10 @@ import android.provider.MediaStore
 import android.widget.Toast
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
+import android.view.MotionEvent
+import androidx.compose.ui.geometry.Offset
+import java.util.concurrent.TimeUnit
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import android.hardware.camera2.CameraCharacteristics
@@ -59,6 +63,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
@@ -106,6 +111,7 @@ import java.util.Locale
 import java.util.concurrent.Executors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -330,6 +336,7 @@ private fun CameraBody(
     val scope = rememberCoroutineScope()
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var boundCamera by remember { mutableStateOf<Camera?>(null) }
+    var focusRing by remember { mutableStateOf<Offset?>(null) }
     // 0=off 1=auto 2=on
     var flashMode by remember { mutableStateOf(0) }
     // 0, 3, 5 seconds
@@ -408,6 +415,29 @@ private fun CameraBody(
                     val preview = Preview.Builder().build().also {
                         it.surfaceProvider = previewView.surfaceProvider
                     }
+                    // Tap to focus + AE
+                    previewView.setOnTouchListener { _, event ->
+                        if (event.action == MotionEvent.ACTION_UP) {
+                            val cam = boundCamera
+                            if (cam != null) {
+                                val point = previewView.meteringPointFactory
+                                    .createPoint(event.x, event.y)
+                                val action = FocusMeteringAction.Builder(
+                                    point,
+                                    FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
+                                ).setAutoCancelDuration(3, TimeUnit.SECONDS).build()
+                                runCatching { cam.cameraControl.startFocusAndMetering(action) }
+                                focusRing = Offset(event.x, event.y)
+                                scope.launch {
+                                    kotlinx.coroutines.delay(1400)
+                                    focusRing = null
+                                }
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    }
                     val selector = when {
                         front -> CameraSelector.DEFAULT_FRONT_CAMERA
                         else -> UltraWideLens.mainSelector()
@@ -461,6 +491,22 @@ private fun CameraBody(
 
         // Rule-of-thirds grid
         }
+
+        // Tap-to-focus reticle
+        focusRing?.let { pt ->
+            Box(
+                Modifier
+                    .offset {
+                        androidx.compose.ui.unit.IntOffset(
+                            (pt.x - 40).toInt().coerceAtLeast(0),
+                            (pt.y - 40).toInt().coerceAtLeast(0)
+                        )
+                    }
+                    .size(80.dp)
+                    .border(1.5.dp, Color(0xFF00F2FE).copy(alpha = 0.85f), CircleShape)
+            )
+        }
+
         if (showGrid) {
             androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
                 val c = Color(0xFF00F2FE).copy(alpha = 0.18f)
