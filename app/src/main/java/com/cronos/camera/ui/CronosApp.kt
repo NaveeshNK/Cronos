@@ -347,11 +347,16 @@ private fun CameraBody(
     val executor = remember { Executors.newSingleThreadExecutor() }
     DisposableEffect(Unit) { onDispose { executor.shutdown() } }
 
-    LaunchedEffect(flashMode, imageCapture) {
-        imageCapture?.flashMode = when (flashMode) {
+    LaunchedEffect(flashMode, imageCapture, boundCamera) {
+        val mode = when (flashMode) {
             1 -> ImageCapture.FLASH_MODE_AUTO
             2 -> ImageCapture.FLASH_MODE_ON
             else -> ImageCapture.FLASH_MODE_OFF
+        }
+        imageCapture?.flashMode = mode
+        // Torch for continuous light when "ON" (helps on some OEMs + video)
+        runCatching {
+            boundCamera?.cameraControl?.enableTorch(flashMode == 2 && !useFront)
         }
     }
     LaunchedEffect(boundCamera) {
@@ -385,7 +390,7 @@ private fun CameraBody(
     }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        key(useUltraWide, useFront, captureMode) {
+        key(useFront, captureMode) {
         AndroidView(
             factory = { ctx ->
                 PreviewView(ctx).apply { scaleType = PreviewView.ScaleType.FIT_CENTER }
@@ -403,10 +408,8 @@ private fun CameraBody(
                     val preview = Preview.Builder().build().also {
                         it.surfaceProvider = previewView.surfaceProvider
                     }
-                    val ultra = useUltraWide && !front
                     val selector = when {
                         front -> CameraSelector.DEFAULT_FRONT_CAMERA
-                        ultra -> UltraWideLens.cameraSelector()
                         else -> UltraWideLens.mainSelector()
                     }
                     try {
@@ -434,6 +437,7 @@ private fun CameraBody(
                         } else {
                             videoCaptureUseCase = null
                             val capture = ImageCapture.Builder()
+                                // flash applied after bind via flashMode state
                                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                                 .build()
                             imageCapture = capture
@@ -576,24 +580,16 @@ private fun CameraBody(
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            data class ZoomOpt(val label: String, val ultra: Boolean, val ratio: Float)
-            val opts = listOf(
-                ZoomOpt("0.6×", true, 1f),
-                ZoomOpt("1×", false, 1f),
-                ZoomOpt("2×", false, 2f),
-                ZoomOpt("5×", false, 5f)
-            )
-            opts.forEach { opt ->
-                val selected = if (opt.ultra) useUltraWide && !useFront
-                else !useUltraWide && kotlin.math.abs(zoomRatio - opt.ratio.coerceIn(minZoom, maxZoom)) < 0.2f
-                // Prefer exclusive: among non-ultra, closest ratio
-                val nonUltraSelected = !useUltraWide && !opt.ultra &&
-                    opts.filter { !it.ultra }.minByOrNull {
-                        kotlin.math.abs(it.ratio.coerceIn(minZoom, maxZoom) - zoomRatio)
-                    }?.ratio == opt.ratio
-                val on = if (opt.ultra) (useUltraWide && !useFront) else nonUltraSelected
+            val opts = listOf(1f, 2f, 5f)
+            val active = opts.minByOrNull {
+                kotlin.math.abs(it.coerceIn(minZoom, maxZoom) - zoomRatio)
+            } ?: 1f
+            opts.forEach { z ->
+                val target = z.coerceIn(minZoom, maxZoom)
+                val on = kotlin.math.abs(active - z) < 0.05f
+                val label = "${z.toInt()}×"
                 Text(
-                    opt.label,
+                    label,
                     color = if (on) Color(0xFF07090E) else Color(0xFF94A3B8),
                     fontWeight = if (on) FontWeight.SemiBold else FontWeight.Medium,
                     style = MaterialTheme.typography.labelMedium,
@@ -602,14 +598,9 @@ private fun CameraBody(
                             if (on) Color(0xFF00F2FE) else Color.Transparent,
                             RoundedCornerShape(50)
                         )
-                        .clickable(enabled = !processing && !isRecording && !(opt.ultra && useFront)) {
-                            if (opt.ultra) {
-                                useUltraWide = true
-                                zoomRatio = 1f
-                            } else {
-                                useUltraWide = false
-                                zoomRatio = opt.ratio.coerceIn(minZoom, maxZoom)
-                            }
+                        .clickable(enabled = !processing && !isRecording) {
+                            useUltraWide = false
+                            zoomRatio = target
                         }
                         .padding(horizontal = 14.dp, vertical = 10.dp)
                 )
@@ -629,9 +620,31 @@ private fun CameraBody(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = {
-                    flashMode = (flashMode + 1) % 3
-                }, enabled = !processing && !useFront) {
+                IconButton(
+                    onClick = {
+                        if (useFront) {
+                            Toast.makeText(context, "Flash: rear camera only", Toast.LENGTH_SHORT).show()
+                        } else {
+                            flashMode = (flashMode + 1) % 3
+                            val label = when (flashMode) {
+                                1 -> "Flash Auto"
+                                2 -> "Flash On"
+                                else -> "Flash Off"
+                            }
+                            Toast.makeText(context, label, Toast.LENGTH_SHORT).show()
+                            // Apply immediately (don't wait only for LaunchedEffect)
+                            imageCapture?.flashMode = when (flashMode) {
+                                1 -> ImageCapture.FLASH_MODE_AUTO
+                                2 -> ImageCapture.FLASH_MODE_ON
+                                else -> ImageCapture.FLASH_MODE_OFF
+                            }
+                            runCatching {
+                                boundCamera?.cameraControl?.enableTorch(flashMode == 2)
+                            }
+                        }
+                    },
+                    enabled = !processing
+                ) {
                     Icon(
                         when (flashMode) {
                             1 -> Icons.Default.FlashAuto
@@ -639,7 +652,7 @@ private fun CameraBody(
                             else -> Icons.Default.FlashOff
                         },
                         contentDescription = "Flash",
-                        tint = Color(0xFFE2E8F0),
+                        tint = if (flashMode == 0) Color(0xFFE2E8F0) else Color(0xFF00F2FE),
                         modifier = Modifier.size(24.dp)
                     )
                 }
@@ -729,6 +742,11 @@ private fun CameraBody(
                             return@clickable
                         }
                         val capture = imageCapture ?: return@clickable
+                        capture.flashMode = when (flashMode) {
+                            1 -> ImageCapture.FLASH_MODE_AUTO
+                            2 -> ImageCapture.FLASH_MODE_ON
+                            else -> ImageCapture.FLASH_MODE_OFF
+                        }
                         val camera = boundCamera
                         fun runBurst() {
                             val files = mutableListOf<File>()
