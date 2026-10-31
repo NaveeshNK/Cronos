@@ -449,26 +449,7 @@ private fun CameraBody(
                     )
                 }
             }
-            Row(Modifier.padding(top = 8.dp)) {
-                Text(
-                    "PHOTO",
-                    color = if (!isVideoMode) Color(0xFFE8B86D) else Color.White.copy(alpha = 0.5f),
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier
-                        .clickable(enabled = !processing && !isRecording) {
-                            isVideoMode = false
-                        }
-                        .padding(end = 16.dp)
-                )
-                Text(
-                    "VIDEO",
-                    color = if (isVideoMode) Color(0xFFE8B86D) else Color.White.copy(alpha = 0.5f),
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.clickable(enabled = !processing && !isRecording) {
-                        isVideoMode = true
-                    }
-                )
-            }
+            
             if (burstStatus != null) {
                 Text(burstStatus, color = Color(0xFFE8B86D), style = MaterialTheme.typography.bodyMedium)
             }
@@ -476,9 +457,6 @@ private fun CameraBody(
                 Text("${countdown}", color = Color(0xFFE8B86D), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.displayMedium)
             }
         }
-
-        Row(
-            Modifier
 
         // Zoom pills (flagship-style 0.6 / 1 / 2 / 5)
         Row(
