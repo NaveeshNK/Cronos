@@ -1,6 +1,8 @@
 package com.cronos.camera.enhance
 
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.params.RggbChannelVector
+import android.util.Log
 import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.CaptureRequestOptions
@@ -8,9 +10,12 @@ import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 
 /**
- * Force EIS/OIS + HQ ISP flags after bind. Call again when recording starts.
+ * Video path: EIS/OIS + ISP HQ + mild vivid color gains.
+ * Call after bind and again when recording starts (MIUI often resets).
  */
 object VideoCaptureTuning {
+
+    private const val TAG = "CronosVideo"
 
     @OptIn(ExperimentalCamera2Interop::class)
     fun applyStabilizationAndColor(camera: Camera?) {
@@ -18,25 +23,39 @@ object VideoCaptureTuning {
         runCatching {
             val c2 = Camera2CameraControl.from(camera.cameraControl)
             val builder = CaptureRequestOptions.Builder()
-            // Prefer ON; PREVIEW_STABILIZATION is separate on newer APIs
+
+            // Digital video stabilization (EIS)
             builder.setCaptureRequestOption(
                 CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE,
                 CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
             )
+            // Optical if available
             runCatching {
-                // API 33+ preview stabilization constant value 2 if present
-                val field = CaptureRequest::class.java.getField("CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION")
-                val mode = field.getInt(null)
-                builder.setCaptureRequestOption(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, mode)
+                builder.setCaptureRequestOption(
+                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
+                )
             }
-            builder.setCaptureRequestOption(
-                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
-                CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
-            )
-            builder.setCaptureRequestOption(
-                CaptureRequest.COLOR_CORRECTION_MODE,
-                CaptureRequest.COLOR_CORRECTION_MODE_HIGH_QUALITY
-            )
+
+            // Mild vivid: boost red/blue channels slightly (photo-like color on video)
+            runCatching {
+                builder.setCaptureRequestOption(
+                    CaptureRequest.COLOR_CORRECTION_MODE,
+                    CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX
+                )
+                builder.setCaptureRequestOption(
+                    CaptureRequest.COLOR_CORRECTION_GAINS,
+                    RggbChannelVector(1.12f, 1.0f, 1.0f, 1.08f)
+                )
+            }
+            // Fallback HQ color if transform rejected
+            runCatching {
+                builder.setCaptureRequestOption(
+                    CaptureRequest.COLOR_CORRECTION_MODE,
+                    CaptureRequest.COLOR_CORRECTION_MODE_HIGH_QUALITY
+                )
+            }
+
             builder.setCaptureRequestOption(
                 CaptureRequest.CONTROL_AWB_MODE,
                 CaptureRequest.CONTROL_AWB_MODE_AUTO
@@ -61,7 +80,16 @@ object VideoCaptureTuning {
                 CaptureRequest.TONEMAP_MODE,
                 CaptureRequest.TONEMAP_MODE_HIGH_QUALITY
             )
-            c2.captureRequestOptions = builder.build()
+            // Prefer continuous video AF
+            builder.setCaptureRequestOption(
+                CaptureRequest.CONTROL_AF_MODE,
+                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO
+            )
+
+            c2.setCaptureRequestOptions(builder.build())
+            Log.d(TAG, "stabilization + color request options applied")
+        }.onFailure {
+            Log.w(TAG, "VideoCaptureTuning failed: ${it.message}")
         }
     }
 }

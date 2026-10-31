@@ -436,9 +436,14 @@ private fun CameraBody(
                 val future = ProcessCameraProvider.getInstance(context)
                 future.addListener({
                     val provider = future.get()
-                    val preview = Preview.Builder().build().also {
+                    val previewBuilder = Preview.Builder()
+                    if (modeVideo) {
+                        runCatching { previewBuilder.setPreviewStabilizationEnabled(true) }
+                    }
+                    val preview = previewBuilder.build().also {
                         it.surfaceProvider = previewView.surfaceProvider
                     }
+
                     val selector = when {
                         front -> CameraSelector.DEFAULT_FRONT_CAMERA
                         else -> UltraWideLens.mainSelector()
@@ -454,7 +459,7 @@ private fun CameraBody(
                             val recorder = Recorder.Builder()
                                 .setQualitySelector(qualitySelector)
                                 // ~12 Mbps FHD — cleaner than default on many devices
-                                .setTargetVideoEncodingBitRate(12_000_000)
+                                .setTargetVideoEncodingBitRate(16_000_000)
                                 .build()
                             val videoCapture = VideoCapture.Builder(recorder)
                                 .setVideoStabilizationEnabled(true)
@@ -778,9 +783,12 @@ private fun CameraBody(
                             } else {
                                 pending
                             }
+                            // Re-apply EIS/color as MIUI often resets on record start
+                            VideoCaptureTuning.applyStabilizationAndColor(boundCamera)
                             activeRecording = prepared.start(ContextCompat.getMainExecutor(context)) { event ->
                                 when (event) {
                                     is VideoRecordEvent.Start -> {
+                                        VideoCaptureTuning.applyStabilizationAndColor(boundCamera)
                                         isRecording = true
                                         VideoCaptureTuning.applyStabilizationAndColor(boundCamera)
                                         onBurstProgress("REC · stabilized")
