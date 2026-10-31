@@ -49,6 +49,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -89,7 +90,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.key
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.keyCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -265,11 +268,19 @@ fun CronosApp() {
 
 @OptIn(ExperimentalCamera2Interop::class)
 private object UltraWideLens {
-    fun cameraSelector(): CameraSelector {
+    // Poco X3 Pro: 48MP main, 8MP UW 119°, 2MP macro, 2MP depth
+    fun cameraSelector(): CameraSelector = buildSelector(preferUltra = true)
+    fun mainSelector(): CameraSelector = buildSelector(preferUltra = false)
+
+    private fun buildSelector(preferUltra: Boolean): CameraSelector {
         return CameraSelector.Builder()
             .requireLensFacing(CameraSelector.LENS_FACING_BACK)
             .addCameraFilter { cameraInfos ->
-                data class Cand(val info: androidx.camera.core.CameraInfo, val focal: Float)
+                data class Cand(
+                    val info: androidx.camera.core.CameraInfo,
+                    val focal: Float,
+                    val sensorW: Int
+                )
                 val cands = cameraInfos.mapNotNull { info ->
                     try {
                         val c2 = Camera2CameraInfo.from(info)
@@ -277,18 +288,29 @@ private object UltraWideLens {
                             CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS
                         ) ?: return@mapNotNull null
                         val minF = focals.minOrNull() ?: return@mapNotNull null
-                        Cand(info, minF)
+                        val size = c2.getCameraCharacteristic(
+                            CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE
+                        )
+                        val sw = size?.width ?: 0
+                        // Exclude macro/depth (~2MP)
+                        if (sw in 1 until 2000) return@mapNotNull null
+                        Cand(info, minF, sw)
                     } catch (_: Throwable) {
                         null
                     }
                 }
                 if (cands.isEmpty()) return@addCameraFilter cameraInfos
-                val widest = cands.minByOrNull { it.focal } ?: return@addCameraFilter cameraInfos
-                listOf(widest.info)
+                val picked = if (preferUltra) {
+                    cands.minByOrNull { it.focal }!!
+                } else {
+                    cands.maxByOrNull { it.sensorW } ?: cands.maxByOrNull { it.focal }!!
+                }
+                listOf(picked.info)
             }
             .build()
     }
 }
+
 
 
 @OptIn(ExperimentalCamera2Interop::class)
@@ -365,6 +387,7 @@ private fun CameraBody(
     }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
+        key(useUltraWide, useFront, captureMode) {
         AndroidView(
             factory = { ctx ->
                 PreviewView(ctx).apply { scaleType = PreviewView.ScaleType.FIT_CENTER }
@@ -386,7 +409,7 @@ private fun CameraBody(
                     val selector = when {
                         front -> CameraSelector.DEFAULT_FRONT_CAMERA
                         ultra -> UltraWideLens.cameraSelector()
-                        else -> CameraSelector.DEFAULT_BACK_CAMERA
+                        else -> UltraWideLens.mainSelector()
                     }
                     try {
                         provider.unbindAll()
@@ -435,6 +458,7 @@ private fun CameraBody(
 
 
         // Rule-of-thirds grid
+        }
         if (showGrid) {
             androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
                 val c = Color(0xFF00F2FE).copy(alpha = 0.18f)
@@ -834,25 +858,38 @@ private fun ReviewBody(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text("Review", color = Color(0xFFE8B86D), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-            Text(if (showOriginal) "Original" else "Enhanced", color = Color(0xFF90A4AE))
+            Text(if (showOriginal) "Original" else "Enhanced", color = Color(0xFF00F2FE))
         }
         Spacer(Modifier.height(12.dp))
+        Text(
+            if (showOriginal) "Original · release for Enhanced"
+            else "Enhanced · long-press for Original",
+            color = Color(0xFF64748B),
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.padding(bottom = 6.dp)
+        )
         Image(
             bitmap = shown.asImageBitmap(),
             contentDescription = null,
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .clip(RoundedCornerShape(16.dp)),
+                .clip(RoundedCornerShape(16.dp))
+                .pointerInput(Unit) {
+                    detectTapGestures(
+                        onPress = {
+                            showOriginal = true
+                            try {
+                                awaitRelease()
+                            } finally {
+                                showOriginal = false
+                            }
+                        }
+                    )
+                },
             contentScale = ContentScale.Fit
         )
         Spacer(Modifier.height(12.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = { showOriginal = !showOriginal }) {
-                Text(if (showOriginal) "Show enhanced" else "Show original", color = Color(0xFF7EB8D4))
-            }
-        }
-        Spacer(Modifier.height(8.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Button(
                 onClick = onRetake,
