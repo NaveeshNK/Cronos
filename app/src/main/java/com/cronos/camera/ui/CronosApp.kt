@@ -11,6 +11,9 @@ import android.provider.MediaStore
 import android.widget.Toast
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+import android.hardware.camera2.CameraCharacteristics
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
@@ -260,6 +263,34 @@ fun CronosApp() {
 }
 
 @Composable
+
+
+@OptIn(ExperimentalCamera2Interop::class)
+private fun ultraWideBackSelector(): CameraSelector {
+    return CameraSelector.Builder()
+        .requireLensFacing(CameraSelector.LENS_FACING_BACK)
+        .addCameraFilter { cameraInfos ->
+            data class Cand(val info: androidx.camera.core.CameraInfo, val focal: Float)
+            val cands = cameraInfos.mapNotNull { info ->
+                try {
+                    val c2 = Camera2CameraInfo.from(info)
+                    val focals = c2.getCameraCharacteristic(
+                        CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS
+                    ) ?: return@mapNotNull null
+                    val minF = focals.minOrNull() ?: return@mapNotNull null
+                    Cand(info, minF)
+                } catch (_: Throwable) {
+                    null
+                }
+            }
+            if (cands.isEmpty()) return@addCameraFilter cameraInfos
+            val widest = cands.minByOrNull { it.focal } ?: return@addCameraFilter cameraInfos
+            // Prefer shortest focal length (ultrawide). If only one camera, still return it.
+            listOf(widest.info)
+        }
+        .build()
+}
+
 private fun CameraBody(
     useFront: Boolean,
     processing: Boolean,
@@ -284,6 +315,7 @@ private fun CameraBody(
     var countdown by remember { mutableStateOf<Int?>(null) }
     var isVideoMode by remember { mutableStateOf(captureMode == CaptureMode.VIDEO) }
     var zoomRatio by remember { mutableStateOf(1.0f) }
+    var useUltraWide by remember { mutableStateOf(false) }
     var showGrid by remember { mutableStateOf(true) }
     var minZoom by remember { mutableStateOf(0.6f) }
     var maxZoom by remember { mutableStateOf(8f) }
@@ -308,7 +340,11 @@ private fun CameraBody(
                 minZoom = zs.minZoomRatio
                 maxZoom = zs.maxZoomRatio
                 // Prefer starting near 0.6 if hardware allows, else min
-                val start = maxOf(minZoom, 0.6f).coerceAtMost(maxZoom)
+                // Start at 1× when possible; only use ultra if hardware supports < 1
+                val start = when {
+                    minZoom < 0.95f -> 1f.coerceIn(minZoom, maxZoom)
+                    else -> 1f.coerceIn(minZoom, maxZoom)
+                }
                 zoomRatio = start
                 cam.cameraControl.setZoomRatio(start)
             }
@@ -337,16 +373,22 @@ private fun CameraBody(
                 val modeVideo = captureMode == CaptureMode.VIDEO
                 val front = useFront
                 val flash = flashMode
+                val ultraWide = useUltraWide
                 val future = ProcessCameraProvider.getInstance(context)
                 future.addListener({
                     val provider = future.get()
                     val preview = Preview.Builder().build().also {
                         it.surfaceProvider = previewView.surfaceProvider
                     }
-                    val selector = if (front) CameraSelector.DEFAULT_FRONT_CAMERA
-                    else CameraSelector.DEFAULT_BACK_CAMERA
+                    val ultra = useUltraWide && !front
+                    val selector = when {
+                        front -> CameraSelector.DEFAULT_FRONT_CAMERA
+                        ultra -> ultraWideBackSelector()
+                        else -> CameraSelector.DEFAULT_BACK_CAMERA
+                    }
                     try {
                         provider.unbindAll()
+                        @Suppress("UNUSED_EXPRESSION") ultraWide // rebind when ultra toggles
                         if (modeVideo) {
                             val qualitySelector = QualitySelector.fromOrderedList(
                                 listOf(Quality.FHD, Quality.HD, Quality.SD),
@@ -458,7 +500,7 @@ private fun CameraBody(
             }
         }
 
-        // Zoom pills (flagship-style 0.6 / 1 / 2 / 5)
+        // Zoom: 0.6× = ultrawide camera (like MIUI); 1/2/5 = main + digital zoom
         Row(
             Modifier
                 .align(Alignment.BottomCenter)
@@ -466,32 +508,48 @@ private fun CameraBody(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            val presets = listOf(0.6f, 1f, 2f, 5f)
-            presets.forEach { z ->
-                val available = z <= maxZoom + 0.05f && z >= minZoom - 0.05f || z == 0.6f
-                val target = z.coerceIn(minZoom, maxZoom)
-                val selected = kotlin.math.abs(zoomRatio - target) < 0.15f ||
-                    (z == 0.6f && kotlin.math.abs(zoomRatio - minZoom) < 0.15f)
-                val label = if (z < 1f) String.format("%.1f×", z) else "${z.toInt()}×"
+            data class ZoomOpt(val label: String, val ultra: Boolean, val ratio: Float)
+            val opts = listOf(
+                ZoomOpt("0.6×", true, 1f),
+                ZoomOpt("1×", false, 1f),
+                ZoomOpt("2×", false, 2f),
+                ZoomOpt("5×", false, 5f)
+            )
+            opts.forEach { opt ->
+                val selected = if (opt.ultra) useUltraWide && !useFront
+                else !useUltraWide && kotlin.math.abs(zoomRatio - opt.ratio.coerceIn(minZoom, maxZoom)) < 0.2f
+                // Prefer exclusive: among non-ultra, closest ratio
+                val nonUltraSelected = !useUltraWide && !opt.ultra &&
+                    opts.filter { !it.ultra }.minByOrNull {
+                        kotlin.math.abs(it.ratio.coerceIn(minZoom, maxZoom) - zoomRatio)
+                    }?.ratio == opt.ratio
+                val on = if (opt.ultra) (useUltraWide && !useFront) else nonUltraSelected
                 Text(
-                    label,
-                    color = if (selected) Color(0xFF052028) else Color.White,
+                    opt.label,
+                    color = if (on) Color(0xFF052028) else Color.White,
                     fontWeight = FontWeight.Bold,
                     style = MaterialTheme.typography.labelLarge,
                     modifier = Modifier
                         .background(
-                            if (selected) Color(0xFFE8B86D) else Color.Black.copy(alpha = 0.45f),
+                            if (on) Color(0xFFE8B86D) else Color.Black.copy(alpha = 0.45f),
                             CircleShape
                         )
                         .border(1.dp, Color(0xFF52FEFE).copy(alpha = 0.5f), CircleShape)
-                        .clickable(enabled = !processing && !isRecording) {
-                            zoomRatio = if (z <= minZoom) minZoom else target
+                        .clickable(enabled = !processing && !isRecording && !(opt.ultra && useFront)) {
+                            if (opt.ultra) {
+                                useUltraWide = true
+                                zoomRatio = 1f
+                            } else {
+                                useUltraWide = false
+                                zoomRatio = opt.ratio.coerceIn(minZoom, maxZoom)
+                            }
                         }
                         .padding(horizontal = 14.dp, vertical = 10.dp)
                 )
             }
         }
 
+        
         Row(
             Modifier
                 .align(Alignment.BottomCenter)
